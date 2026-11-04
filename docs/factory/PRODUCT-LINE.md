@@ -1,6 +1,6 @@
 # Product line and reference stack
 
-**Status: DRAFT for the owner's decision.** Phase A depends on this document (spec §10.1, §1.2).
+**Status: APPROVED by the owner on 2026-11-04.** Phase A depends on this document (spec §10.1, §1.2).
 The factory onboards only repositories on the reference stack while the factory is at version
 0.x; a second language runtime waits (spec §9.4). History supports this: SDC's factory failed
 partly because "every job was totally different" across heterogeneous environments (HIST-12),
@@ -10,8 +10,8 @@ and the Japanese factories standardized one product family first (HIST-13).
 
 | Question | Draft answer | Owner decision |
 |---|---|---|
-| What kinds of applications will the factory build? | Web applications and HTTP services for small businesses: a TypeScript back end, a web front end, a relational database | ☐ confirm / change |
-| What is out of scope for 0.x? | Native mobile apps, embedded, ML training pipelines, anything regulated (medical, payments processing beyond a hosted provider) | ☐ confirm / change |
+| What kinds of applications will the factory build? | Web applications and HTTP services for small businesses: a TypeScript back end, a web front end, a relational database | ☑ confirmed 2026-11-04 |
+| What is out of scope for 0.x? | Native mobile apps, embedded, ML training pipelines, anything regulated (medical, payments processing beyond a hosted provider) | ☑ confirmed 2026-11-04 |
 | Who reviews and merges? | The owner, alone. Tier 3 never runs unattended | ☑ decided 2026-11-04 |
 
 ## 2. Reference stack
@@ -42,6 +42,6 @@ and the Japanese factories standardized one product family first (HIST-13).
 ## 4. Decision
 
 ```
-PRODUCT_LINE_STATUS: draft   # change to "approved" with the date when the owner confirms
-APPROVED_ON: <YYYY-MM-DD>
+PRODUCT_LINE_STATUS: approved
+APPROVED_ON: 2026-11-04
 ```

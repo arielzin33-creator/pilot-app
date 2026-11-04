@@ -81,9 +81,11 @@ cat > /tmp/factory-ruleset.json <<JSON
 JSON
 existing="$(gh api "repos/$REPO/rulesets" --jq '.[] | select(.name=="factory-default-branch") | .id' || true)"
 if [ -n "$existing" ]; then
-  gh api -X PUT "repos/$REPO/rulesets/$existing" --input /tmp/factory-ruleset.json >/dev/null && echo "   updated ruleset $existing"
+  gh api -X PUT "repos/$REPO/rulesets/$existing" --input /tmp/factory-ruleset.json >/dev/null
+  echo "   updated ruleset $existing"
 else
-  gh api -X POST "repos/$REPO/rulesets" --input /tmp/factory-ruleset.json >/dev/null && echo "   created ruleset"
+  gh api -X POST "repos/$REPO/rulesets" --input /tmp/factory-ruleset.json >/dev/null
+  echo "   created ruleset"
 fi
 
 echo "== Deployment environments (Phase D)"
@@ -100,13 +102,23 @@ for envname in preview staging production factory-merge; do
   else
     body='{}'
   fi
-  printf '%s' "$body" | gh api -X PUT "repos/$REPO/environments/$envname" --input - >/dev/null && echo "   $envname"
+  # No "&& echo" here or on the ruleset calls: set -e ignores a failure inside an && list, which
+  # would report success while leaving the branch or production unprotected.
+  printf '%s' "$body" | gh api -X PUT "repos/$REPO/environments/$envname" --input - >/dev/null
+  echo "   $envname"
   # Only the default branch may deploy to staging and production (explicit policy; rulesets
   # may not count as "protected branches" for environments).
   if [ "$envname" != preview ]; then
     gh api -X POST "repos/$REPO/environments/$envname/deployment-branch-policies" -f name="$DEFAULT_BRANCH" -f type=branch >/dev/null 2>&1 || true
   fi
 done
+# Required reviewers need a public repository below GitHub Enterprise. Without the rule, production
+# deploys with nobody's approval, so stop rather than carry on.
+reviewers="$(gh api "repos/$REPO/environments/production" --jq '[.protection_rules[]? | select(.type == "required_reviewers")] | length')"
+if [ "$reviewers" -eq 0 ]; then
+  echo "ERROR: production has no required reviewer. On a private repository this needs GitHub Enterprise; make the repository public or provide another production gate." >&2
+  exit 1
+fi
 echo "   Add environment secrets yourself (DEPLOY_TOKEN or DEPLOY_SSH_KEY) for the provider you choose."
 echo "   If you use auto-merge, put FACTORY_MERGE_APP_KEY in the factory-merge environment, not the repository."
 
