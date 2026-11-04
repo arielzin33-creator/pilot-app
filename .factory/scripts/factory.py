@@ -123,6 +123,9 @@ def git(root: Path, *args: str, check: bool = True) -> str:
     res = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
                          encoding="utf-8", errors="surrogateescape")
     if check and res.returncode != 0:
+        if "--attr-source" in res.stderr and "unknown option" in res.stderr:
+            raise RuntimeError("git is too old for --attr-source (needs git 2.40 or later); the diff "
+                               "policy refuses to run rather than let .gitattributes hide changes")
         raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
     return res.stdout
 
