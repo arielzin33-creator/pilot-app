@@ -39,3 +39,54 @@ must cite their run of evidence (charter §9).
   variable is set). The ledger is the metrics source of truth.
 - **Reason:** most hosted collectors require an authentication token, which would be a
   long-lived secret; the Phase A exit criterion is zero long-lived keys.
+
+## 2026-11-04 — Independent review: agent code never shares a writable filesystem with a verdict
+
+- **Context:** a reviewer that had not seen the build process audited the factory adversarially.
+  Confirmed findings:
+  - agent-written test code (in the Stop hook and the gates job) could overwrite the trusted
+    engine copy or the evidence;
+  - the diff classifier could be bypassed by renames, non-ASCII file names, type changes,
+    `.gitattributes` and embedded test-runner configuration;
+  - the trusted `gates.sh` changed into the wrong directory and would have reported
+    `MISCONFIGURED` on every run;
+  - a duplicated workflow key would probably have made the implement workflow invalid.
+- **Decision:**
+  1. All agent-written code outside Claude Code's own sandbox runs through
+     `sandbox-exec.sh`. This is bubblewrap with no network, a new PID namespace, a cleared
+     environment, and a read-only filesystem except the checkout; `.git` is also read-only
+     for the Stop hook.
+  2. The gates job is authoritative. It checks the patch hash, then re-runs the diff policy
+     with the base's engine before any agent code runs.
+  3. Post-agent git commands use a copy of `.git` taken before the agent ran.
+  4. Artifacts are downloaded by exact name.
+  5. Publish runs only scripts from the default branch.
+  6. The classifier ignores repository attributes and does not pair renames.
+  7. Moving or replacing an existing test counts as modifying it.
+  8. `npm ci --ignore-scripts` is used where an OIDC token is available.
+  9. The required status is bound to the GitHub Actions app.
+- **Not verified here:** the bubblewrap profile could not be executed in the build environment,
+  which lacks bubblewrap. Its tests run in the factory's CI on Ubuntu runners and must pass
+  before the first live run.
+
+## 2026-11-04 — Second review pass: verdicts from exit codes, hooks from the trusted copy
+
+- **Context:** a second independent pass verified the fixes above and found six more gaps.
+  - Code under test could still write `.factory`/`.claude` inside the checkout, and hooks ran
+    from there.
+  - Verdicts were parsed from log lines the code under test could also print.
+  - `.git` was writable in the gates job, and the proof used `HEAD~1`.
+  - `factory-gates.yml` ran PR code in the job that posts the status.
+  - A failed gates job was reported as `policy-blocked`.
+  - Abandoned claims were never released.
+- **Decision:**
+  1. `sandbox-exec.sh` always mounts the factory control files read-only.
+  2. `render-settings --hooks-dir` points every hook at the pre-agent copy.
+  3. GREEN and PROVEN are accepted only from the trusted script's exit code, with HEAD
+     unchanged.
+  4. `.git` is read-only, and the proof uses the explicit base SHA.
+  5. `factory-gates.yml` runs base-commit scripts in the sandbox and posts the status from a
+     separate `statuses: write` job.
+  6. The outcome checks the gates job's result before its outputs.
+  7. `select-item` releases claims with no activity for `stale_in_progress_hours`.
+  8. `ci_fix_commits` is reserved until a CI-fix loop exists (Phase B).

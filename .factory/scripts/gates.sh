@@ -2,7 +2,8 @@
 # gates.sh - the factory's deterministic verdict.
 #
 # Adapted from Addy Osmani's `factory` (MIT License, Copyright (c) 2026 Addy Osmani);
-# see NOTICE.md. Changes: lives in .factory/scripts; reads .factory/gates.conf.
+# see NOTICE.md. Changes: lives in .factory/scripts; reads .factory/gates.conf (or
+# FACTORY_GATES_CONF); tests the working directory's repository (or FACTORY_ROOT).
 #
 # This is the one part of the pipeline that cannot be talked out of its verdict
 # by a confident paragraph. Every factory skill calls it. Nothing merges without it.
@@ -23,8 +24,12 @@
 set -uo pipefail
 
 LEVEL="${1:-full}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# The repository under test is the working directory's repository, not the script's location:
+# the workflow runs a trusted copy of this script from outside the checkout.
+ROOT="${FACTORY_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 cd "$ROOT" || exit 2
+# Gate requirements come from the trusted copy when the workflow provides one.
+GATES_CONF="${FACTORY_GATES_CONF:-$ROOT/.factory/gates.conf}"
 
 case "$LEVEL" in
   fast|full|deep) ;;
@@ -38,10 +43,14 @@ esac
 REQUIRED_FAST="types lint"
 REQUIRED_FULL="types lint test"
 REQUIRED_DEEP="types lint test audit architecture"
-if [ -f .factory/gates.conf ]; then
+if [ -f "$GATES_CONF" ]; then
   # This file is protected by the factory contract and contains assignments only.
-  # shellcheck disable=SC1091
-  source .factory/gates.conf
+  # shellcheck disable=SC1090
+  source "$GATES_CONF"
+elif [ -n "${FACTORY_GATES_CONF:-}" ]; then
+  echo "error: FACTORY_GATES_CONF=$FACTORY_GATES_CONF does not exist" >&2
+  printf 'FACTORY_GATES: level=%s status=MISCONFIGURED passed=0 failed=0 failing=none skipped=none misconfigured=gates-conf-missing\n' "$LEVEL"
+  exit 2
 fi
 
 case "$LEVEL" in
@@ -181,7 +190,10 @@ fi
 if [ "$LEVEL" = "deep" ]; then
   case "$STACK" in
     node)
-      run audit $PM audit --audit-level=high
+      # In the sandbox there is no network; the workflow runs the audit outside it (the audit
+      # reads the lockfile and executes no project code) and passes the result in.
+      if [ -n "${FACTORY_AUDIT_STATUS:-}" ]; then run audit test "$FACTORY_AUDIT_STATUS" = pass
+      else run audit $PM audit --audit-level=high; fi
       if pkg_has mutation; then run mutation $PMRUN mutation
       else skip mutation "no 'mutation' script (see CHARTER.md - coverage is not a substitute)"; fi
       ;;

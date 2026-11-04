@@ -8,4 +8,9 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "BLOCKED by factory guard: python3 unavailable; failing closed" >&2
   exit 2
 fi
-exec python3 -I "$ROOT/.factory/scripts/factory.py" hook-guard
+# The engine and policy are taken from next to this hook. In factory runs the hooks are
+# invoked from the trusted pre-agent copy (render-settings --hooks-dir), so nothing in the
+# working tree is executed; interactively they resolve to the repository's own copy.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export FACTORY_POLICY="${FACTORY_POLICY:-$HERE/policy.json}"
+exec python3 -I "$HERE/scripts/factory.py" hook-guard

@@ -4,7 +4,11 @@
 #   preflight  read-only token; STOP_IF; selects the item. No agent.
 #   implement  agent edits files in a sandbox with no network; Anthropic access by workload
 #              identity federation (no API key); the diff is checked by the trusted engine copy.
-#   gates      NO secrets and no id-token: applies the patch, runs gates and the failing-test proof.
+#   claim      labels the item factory:in-progress (issues: write only).
+#   gates      NO secrets and no id-token. Authoritative: checks the patch hash, re-runs the diff
+#              policy with the base's engine before any agent code runs, then runs gates and the
+#              failing-test proof inside a bubblewrap sandbox (no network, read-only filesystem
+#              except the checkout) so code under test cannot alter the verdict or the evidence.
 #   verify     a different model reads the change cold (advisory in Phase A).
 #   publish    deterministic: claim branch, commit with trailers, draft PR, status, labels, ledger.
 # A human reviews and merges. Nothing in this workflow can merge.
@@ -122,8 +126,23 @@ jobs:
             --remove-label factory:ready-to-implement --remove-label factory:in-progress || true
           gh issue comment "$ISSUE" -R "$REPO" --body "The factory stopped before working on this item: \`$REASONS\`. A human decides the next step (see docs/factory/CHARTER.md §7). Run: $RUN_URL"
 
-  implement:
+  claim:
     needs: preflight
+    if: needs.preflight.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Label the item factory:in-progress (CLAIMED_ELSEWHERE for other runs)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ needs.preflight.outputs.issue }}
+          REPO: ${{ github.repository }}
+        run: gh issue edit "$ISSUE" -R "$REPO" --add-label factory:in-progress
+
+  implement:
+    needs: [preflight, claim]
     if: needs.preflight.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45            # supervisor wall-clock cap; Claude Code has none (spec §4.3)
@@ -132,6 +151,7 @@ jobs:
       id-token: write              # GitHub OIDC -> Anthropic workload identity federation
     outputs:
       patch_bytes: ${{ steps.diff.outputs.patch_bytes }}
+      patch_sha256: ${{ steps.diff.outputs.patch_sha256 }}
       diff_ok: ${{ steps.diff.outputs.ok }}
       gate_level: ${{ steps.diff.outputs.gate_level }}
       tier: ${{ steps.diff.outputs.tier }}
@@ -156,6 +176,9 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           mkdir -p "$RUNNER_TEMP/trusted" "$RUNNER_TEMP/evidence" "$RUNNER_TEMP/run"
           cp -R .factory "$RUNNER_TEMP/trusted/.factory"
+          # Git metadata as it was before the agent: post-agent git commands use this copy, so
+          # nothing the agent or its tests write under .git (config, hooks) is ever executed.
+          cp -a .git "$RUNNER_TEMP/trusted/git"
           git rev-parse HEAD > "$RUNNER_TEMP/evidence/base_sha.txt"
       - name: Configuration trust check before the agent starts
         run: python3 -I .factory/scripts/factory.py config-hashes
@@ -167,7 +190,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies before the agent (the agent has no network)
-        run: npm ci
+        run: npm ci --ignore-scripts       # no install scripts while id-token is available
       - name: Prepare the Linux sandbox (bubblewrap, socat)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap socat >/dev/null
@@ -185,6 +208,10 @@ jobs:
           print("turns=" + str(p["limits"]["per_run_max_turns"]))
           EOF
           echo "IMPLEMENT_SCHEMA=$(cat .factory/schemas/implement.schema.min.json)" >> "$GITHUB_ENV"
+          # Sandbox paths are written absolute (relative ones are unreliable with --settings).
+          python3 -I .factory/scripts/factory.py render-settings --in .factory/worker-settings.json \
+            --out "$RUNNER_TEMP/run/worker-settings.json" --root "$GITHUB_WORKSPACE" \
+            --hooks-dir "$RUNNER_TEMP/trusted/.factory/hooks"
       - name: Render the prompt (issue text is wrapped as untrusted data)
         id: render
         run: |
@@ -214,7 +241,7 @@ jobs:
           anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
           prompt: ${{ steps.render.outputs.prompt }}
-          settings: .factory/worker-settings.json
+          settings: ${{ runner.temp }}/run/worker-settings.json
           display_report: "false"
           claude_args: >-
             --model ${{ steps.policy.outputs.model }}
@@ -239,10 +266,16 @@ jobs:
         if: always()
         env:
           FACTORY_POLICY: ${{ runner.temp }}/trusted/.factory/policy.json
+          GIT_DIR: ${{ runner.temp }}/trusted/git
+          GIT_WORK_TREE: ${{ github.workspace }}
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+          GIT_ATTR_SOURCE: 4b825dc642cb6eb9a060e54bf8d69288fbee4904   # empty tree: ignore .gitattributes
         run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           BASE="$(cat "$RUNNER_TEMP/evidence/base_sha.txt")"
           git add -A
-          git diff --cached --binary "$BASE" -- . ':(exclude)docs/factory/runs' > "$RUNNER_TEMP/evidence/change.patch"
+          git diff --cached --binary --text --no-ext-diff --no-textconv "$BASE" -- . ':(exclude)docs/factory/runs' > "$RUNNER_TEMP/evidence/change.patch"
           git reset -q
           set +e
           python3 -I "$RUNNER_TEMP/trusted/.factory/scripts/factory.py" check-diff --base "$BASE" > "$RUNNER_TEMP/evidence/classify.json"
@@ -250,6 +283,7 @@ jobs:
           set -e
           cat "$RUNNER_TEMP/evidence/classify.json"
           echo "patch_bytes=$(wc -c < "$RUNNER_TEMP/evidence/change.patch")" >> "$GITHUB_OUTPUT"
+          echo "patch_sha256=$(sha256sum "$RUNNER_TEMP/evidence/change.patch" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "ok=$([ $code -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "gate_level=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate_level"])' "$RUNNER_TEMP/evidence/classify.json")" >> "$GITHUB_OUTPUT"
           echo "tier=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["tier"])' "$RUNNER_TEMP/evidence/classify.json")" >> "$GITHUB_OUTPUT"
@@ -285,6 +319,8 @@ jobs:
     permissions:
       contents: read               # no secrets, no id-token: agent code runs here
     outputs:
+      diff_ok: ${{ steps.policy.outputs.ok }}
+      tier: ${{ steps.policy.outputs.tier }}
       gates_status: ${{ steps.gates.outputs.status }}
       proof_status: ${{ steps.proof.outputs.status }}
     steps:
@@ -293,38 +329,79 @@ jobs:
           ref: ${{ needs.implement.outputs.base_sha }}
           fetch-depth: 1
           persist-credentials: false
-          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence-implement-${{ github.run_id }}
-          path: ${{ runner.temp }}/evidence
-      - name: Apply the patch and commit locally
-        run: |
-          cp -R .factory "$RUNNER_TEMP/trusted-factory"
-          git -c user.name=factory -c user.email=factory@localhost apply --index --whitespace=nowarn "$RUNNER_TEMP/evidence/change.patch"
-          git -c user.name=factory -c user.email=factory@localhost commit -q -m "factory candidate"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-      - run: npm ci
-      - name: Gates (authoritative verdict)
-        id: gates
+          path: ${{ runner.temp }}/implement
+      - name: Check the patch hash, copy the trusted engine, apply the patch
         env:
-          LEVEL: ${{ needs.implement.outputs.gate_level }}
+          EXPECTED_SHA256: ${{ needs.implement.outputs.patch_sha256 }}
+        run: |
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/implement/change.patch" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/evidence"
+          cp -R .factory "$RUNNER_TEMP/trusted-factory"
+          git -c user.name=factory -c user.email=factory@localhost apply --index --whitespace=nowarn "$RUNNER_TEMP/implement/change.patch"
+      - name: Diff policy, authoritative (base engine and policy, before any agent code runs)
+        id: policy
+        env:
+          FACTORY_POLICY: ${{ runner.temp }}/trusted-factory/policy.json
         run: |
           set +e
-          bash "$RUNNER_TEMP/trusted-factory/scripts/gates.sh" "$LEVEL" | tee "$RUNNER_TEMP/gates.log"
+          python3 -I "$RUNNER_TEMP/trusted-factory/scripts/factory.py" check-diff --base HEAD > "$RUNNER_TEMP/evidence/classify.json"
+          code=$?
           set -e
-          line="$(grep '^FACTORY_GATES:' "$RUNNER_TEMP/gates.log" | tail -1)"
-          echo "${line:-FACTORY_GATES: level=$LEVEL status=MISCONFIGURED reason=no-verdict-line}" > "$RUNNER_TEMP/evidence/gates.txt"
-          status="$(sed -n 's/.*status=\([A-Z]*\).*/\1/p' "$RUNNER_TEMP/evidence/gates.txt")"
-          echo "status=${status:-MISCONFIGURED}" >> "$GITHUB_OUTPUT"
-      - name: Failing-test proof (rung 3)
-        id: proof
+          cat "$RUNNER_TEMP/evidence/classify.json"
+          echo "ok=$([ $code -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          for k in tier gate_level; do
+            echo "$k=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$RUNNER_TEMP/evidence/classify.json" "$k")" >> "$GITHUB_OUTPUT"
+          done
+          echo "tests_only=$(python3 -I -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["tests_only"]).lower())' "$RUNNER_TEMP/evidence/classify.json")" >> "$GITHUB_OUTPUT"
+          git -c user.name=factory -c user.email=factory@localhost commit -q -m "factory candidate"
+          echo "candidate=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.policy.outputs.ok == 'true'
+        with:
+          node-version: 22
+      - name: Dependencies and sandbox
+        if: steps.policy.outputs.ok == 'true'
+        run: |
+          npm ci --ignore-scripts
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Gates (authoritative verdict, sandboxed)
+        id: gates
+        if: steps.policy.outputs.ok == 'true'
         env:
-          LEVEL: ${{ needs.implement.outputs.gate_level }}
-          TIER: ${{ needs.implement.outputs.tier }}
-          TESTS_ONLY: ${{ needs.implement.outputs.tests_only }}
+          LEVEL: ${{ steps.policy.outputs.gate_level }}
+          FACTORY_GATES_CONF: ${{ runner.temp }}/trusted-factory/gates.conf
+          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF
+          SANDBOX_RO_GIT: "1"
+          CANDIDATE: ${{ steps.policy.outputs.candidate }}
+        run: |
+          set +e
+          bash "$RUNNER_TEMP/trusted-factory/scripts/sandbox-exec.sh" "$GITHUB_WORKSPACE" -- \
+            bash "$RUNNER_TEMP/trusted-factory/scripts/gates.sh" "$LEVEL" > "$RUNNER_TEMP/gates.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/gates.log"
+          # The verdict is the trusted script's exit code, read outside the sandbox. The log line
+          # is evidence only: code under test shares stdout and could print a forged line.
+          line="$(grep '^FACTORY_GATES:' "$RUNNER_TEMP/gates.log" | tail -1)"
+          case "$code" in 0) status=GREEN ;; 1) status=RED ;; *) status=MISCONFIGURED ;; esac
+          case "$line" in *"status=$status "*) ;; *) [ "$status" = GREEN ] && status=MISCONFIGURED ;; esac
+          [ "$(git rev-parse HEAD)" = "$CANDIDATE" ] || status=MISCONFIGURED
+          [ "$code" -eq 125 ] && line="sandbox unavailable"
+          echo "FACTORY_GATES: level=$LEVEL status=$status exit=$code | ${line:-no verdict line}" > "$RUNNER_TEMP/evidence/gates.txt"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Failing-test proof (rung 3, sandboxed)
+        id: proof
+        if: steps.policy.outputs.ok == 'true'
+        env:
+          TIER: ${{ steps.policy.outputs.tier }}
+          TESTS_ONLY: ${{ steps.policy.outputs.tests_only }}
+          SANDBOX_RO_GIT: "1"
+          BASE_SHA: ${{ needs.implement.outputs.base_sha }}
+          CANDIDATE: ${{ steps.policy.outputs.candidate }}
         run: |
           if [ "$TIER" = "0" ]; then
             echo "PROOF: status=NOT_REQUIRED reason=tier-0-docs-or-dependency-bump" > "$RUNNER_TEMP/evidence/proof.txt"
@@ -332,25 +409,34 @@ jobs:
             echo "PROOF: status=NOT_REQUIRED reason=new-tests-only" > "$RUNNER_TEMP/evidence/proof.txt"
           else
             set +e
-            bash "$RUNNER_TEMP/trusted-factory/scripts/prove-test.sh" "HEAD~1" -- npm test > "$RUNNER_TEMP/proof.log" 2>&1
+            bash "$RUNNER_TEMP/trusted-factory/scripts/sandbox-exec.sh" "$GITHUB_WORKSPACE" -- \
+              bash "$RUNNER_TEMP/trusted-factory/scripts/prove-test.sh" "$BASE_SHA" -- npm test > "$RUNNER_TEMP/proof.log" 2>&1
+            code=$?
             set -e
+            cat "$RUNNER_TEMP/proof.log"
+            # As for the gates: the status is the trusted script's exit code, not a log line.
             line="$(grep '^PROOF:' "$RUNNER_TEMP/proof.log" | tail -1)"
-            echo "${line:-PROOF: status=MISCONFIGURED reason=no-proof-line}" > "$RUNNER_TEMP/evidence/proof.txt"
+            case "$code" in 0) st=PROVEN ;; 1) st=FAILED ;; *) st=MISCONFIGURED ;; esac
+            case "$line" in *"status=$st"*) ;; *) [ "$st" = PROVEN ] && st=MISCONFIGURED ;; esac
+            [ "$(git rev-parse HEAD)" = "$CANDIDATE" ] || st=MISCONFIGURED
+            git diff --quiet HEAD || st=MISCONFIGURED            # tree must be restored exactly
+            echo "PROOF: status=$st exit=$code | ${line:-no proof line}" > "$RUNNER_TEMP/evidence/proof.txt"
           fi
           cat "$RUNNER_TEMP/evidence/proof.txt"
-          echo "status=$(sed -n 's/.*status=\([A-Z_]*\).*/\1/p' "$RUNNER_TEMP/evidence/proof.txt")" >> "$GITHUB_OUTPUT"
+          echo "status=$(sed -n 's/^PROOF: status=\([A-Z_]*\).*/\1/p' "$RUNNER_TEMP/evidence/proof.txt")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: evidence-gates-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/evidence/classify.json
             ${{ runner.temp }}/evidence/gates.txt
             ${{ runner.temp }}/evidence/proof.txt
           retention-days: 30
 
   verify:
     needs: [preflight, implement, gates]
-    if: needs.gates.outputs.gates_status == 'GREEN' && (needs.gates.outputs.proof_status == 'PROVEN' || needs.gates.outputs.proof_status == 'NOT_REQUIRED')
+    if: needs.gates.outputs.diff_ok == 'true' && needs.gates.outputs.gates_status == 'GREEN' && (needs.gates.outputs.proof_status == 'PROVEN' || needs.gates.outputs.proof_status == 'NOT_REQUIRED')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -367,15 +453,22 @@ jobs:
           ref: ${{ needs.implement.outputs.base_sha }}
           fetch-depth: 1
           persist-credentials: false
-          persist-credentials: false
+      # Artifacts are downloaded by exact name (never by pattern), implement first, then gates,
+      # so the gates job's authoritative classify.json replaces the implement job's.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: evidence-*-${{ github.run_id }}
+          name: evidence-implement-${{ github.run_id }}
           path: ${{ runner.temp }}/evidence
-          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: evidence-gates-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
       - name: Apply the candidate and render the verifier prompt
         id: render
+        env:
+          EXPECTED_SHA256: ${{ needs.implement.outputs.patch_sha256 }}
         run: |
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/evidence/change.patch" | sha256sum -c -
           cp -R .factory "$RUNNER_TEMP/trusted-factory"
           BASE="$(cat "$RUNNER_TEMP/evidence/base_sha.txt")"
           git -c user.name=factory -c user.email=factory@localhost apply --index --whitespace=nowarn "$RUNNER_TEMP/evidence/change.patch"
@@ -404,6 +497,8 @@ jobs:
           print("turns=" + str(p["limits"]["verify_run_max_turns"]))
           EOF
           echo "VERIFY_SCHEMA=$(cat .factory/schemas/verify.schema.min.json)" >> "$GITHUB_ENV"
+          python3 -I "$RUNNER_TEMP/trusted-factory/scripts/factory.py" render-settings --in "$RUNNER_TEMP/trusted-factory/verifier-settings.json" \
+            --out "$RUNNER_TEMP/verifier-settings.json" --root "$GITHUB_WORKSPACE"
       - name: Verifier (different model, fresh context, read-only)
         id: claude
         continue-on-error: true
@@ -414,7 +509,7 @@ jobs:
           anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
           prompt: ${{ steps.render.outputs.prompt }}
-          settings: .factory/verifier-settings.json
+          settings: ${{ runner.temp }}/verifier-settings.json
           display_report: "false"
           claude_args: >-
             --model ${{ steps.render.outputs.model }}
@@ -460,15 +555,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+      - name: Copy the default branch's factory scripts (publish never runs candidate code)
+        run: cp -R .factory "$RUNNER_TEMP/trusted-main"
+      # Exact names, in order: implement, gates (authoritative classify.json), verify.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
         with:
-          pattern: evidence-*-${{ github.run_id }}
+          name: evidence-implement-${{ github.run_id }}
           path: ${{ runner.temp }}/evidence
-          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.gates.result == 'success'
+        continue-on-error: true
+        with:
+          name: evidence-gates-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.verify.result == 'success'
+        continue-on-error: true
+        with:
+          name: evidence-verify-${{ github.run_id }}
+          path: ${{ runner.temp }}/evidence
       - name: Decide the outcome
         id: outcome
         env:
           DIFF_OK: ${{ needs.implement.outputs.diff_ok }}
+          GATES_DIFF_OK: ${{ needs.gates.outputs.diff_ok }}
+          GATES_RESULT: ${{ needs.gates.result }}
+          EXPECTED_SHA256: ${{ needs.implement.outputs.patch_sha256 }}
           PATCH_BYTES: ${{ needs.implement.outputs.patch_bytes }}
           AGENT_STATUS: ${{ needs.implement.outputs.agent_status }}
           GATES: ${{ needs.gates.outputs.gates_status }}
@@ -483,7 +596,10 @@ jobs:
           elif [ "${AGENT_STATUS:-none}" != "done" ]; then outcome="escalated"
           elif [ "${PATCH_BYTES:-0}" = "0" ]; then outcome="no-change"
           elif [ "$DIFF_OK" != "true" ]; then outcome="policy-blocked"
-          elif [ "$GATES" = "MISCONFIGURED" ]; then outcome="misconfigured"
+          elif [ "$GATES_RESULT" != "success" ]; then outcome="misconfigured"     # hash, apply or runner failure
+          elif ! echo "$EXPECTED_SHA256  $EV/change.patch" | sha256sum -c - >/dev/null 2>&1; then outcome="misconfigured"
+          elif [ "$GATES_DIFF_OK" != "true" ]; then outcome="policy-blocked"
+          elif [ "$GATES" = "MISCONFIGURED" ] || [ "$PROOF" = "MISCONFIGURED" ]; then outcome="misconfigured"
           elif [ "$GATES" != "GREEN" ]; then outcome="red"
           elif [ "$PROOF" != "PROVEN" ] && [ "$PROOF" != "NOT_REQUIRED" ]; then outcome="red"
           else outcome="publish"; fi
@@ -494,16 +610,16 @@ jobs:
         if: steps.outcome.outputs.outcome == 'publish'
         run: |
           set +e
-          bash .factory/scripts/publish.sh "$RUNNER_TEMP/evidence"
+          bash "$RUNNER_TEMP/trusted-main/scripts/publish.sh" "$RUNNER_TEMP/evidence"
           code=$?
           set -e
           if [ $code -eq 3 ]; then echo "final=claimed-elsewhere" >> "$GITHUB_OUTPUT";
           elif [ $code -ne 0 ]; then echo "final=publish-failed" >> "$GITHUB_OUTPUT";
           else echo "final=published" >> "$GITHUB_OUTPUT"; fi
       - name: Report a non-published outcome on the issue
-        if: steps.outcome.outputs.outcome != 'publish' || steps.pub.outputs.final == 'publish-failed'
+        if: steps.outcome.outputs.outcome != 'publish' || steps.pub.outputs.final != 'published'
         env:
-          OUTCOME: ${{ steps.outcome.outputs.outcome }}
+          OUTCOME: ${{ steps.pub.outputs.final || steps.outcome.outputs.outcome }}
         run: |
           EV="$RUNNER_TEMP/evidence"
           reasons="$(python3 -I -c 'import json,sys
@@ -512,6 +628,9 @@ jobs:
           agent_reason="$(python3 -I -c 'import json,sys
           try: d=json.load(open(sys.argv[1])); print((d.get("status","") + ": " + d.get("reason",""))[:300])
           except Exception: print("")' "$EV/implement.json")"
+          # factory:in-progress was set by this run's claim job (one implement run at a time:
+          # concurrency group factory-implement), so removing it here releases our own claim.
+          # claimed-elsewhere means the branch claude/fq-N already exists: a human decides.
           case "$OUTCOME" in
             red|misconfigured) label_args="--remove-label factory:in-progress" ;;     # retry allowed until RED_GATES_TWICE
             *) label_args="--add-label factory:needs-human --remove-label factory:ready-to-implement --remove-label factory:in-progress" ;;
@@ -558,4 +677,5 @@ jobs:
           })
           (ev / "record.json").write_text(json.dumps(rec, indent=2, sort_keys=True))
           EOF
-          bash .factory/scripts/ledger-commit.sh "$EV/record.json" "${RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git checkout --quiet --force "${{ github.sha }}"
+          bash "$RUNNER_TEMP/trusted-main/scripts/ledger-commit.sh" "$EV/record.json" "${RUN_ID}-${GITHUB_RUN_ATTEMPT}"

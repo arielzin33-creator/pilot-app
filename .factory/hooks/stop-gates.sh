@@ -4,9 +4,10 @@
 # stopping". The authoritative verdict is the separate, secret-less gates job; this hook
 # only shortens the loop.
 #
-# Gates run agent-written code. When bubblewrap is available they run with no network
-# (--unshare-net) because hooks execute outside Claude Code's Bash sandbox (TOOL-14).
-# Without bubblewrap the hook skips (exit 0) rather than run agent code with network.
+# Gates run agent-written code, and hooks execute outside Claude Code's Bash sandbox
+# (TOOL-14). They therefore run through sandbox-exec.sh: no network, new PID namespace,
+# cleared environment, filesystem read-only except the working tree. Without bubblewrap the
+# hook skips (exit 0) rather than run agent code unconfined.
 set -uo pipefail
 ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 LEVEL="${FACTORY_GATE_LEVEL:-full}"
@@ -25,10 +26,13 @@ if [ "$count" -ge "$MAX" ]; then
   exit 0
 fi
 
-if command -v bwrap >/dev/null 2>&1 && bwrap --dev-bind / / --unshare-net true >/dev/null 2>&1; then
-  OUT="$(cd "$ROOT" && bwrap --dev-bind / / --unshare-net --die-with-parent -- ./.factory/scripts/gates.sh "$LEVEL" 2>&1)"
-  STATUS=$?
-else
+# Read-only everywhere except the working tree; .git read-only too, so code under test
+# cannot plant git configuration (core.fsmonitor, hooks) that later trusted steps would run.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # trusted copy in factory runs
+OUT="$(cd "$ROOT" && SANDBOX_RO_GIT=1 FACTORY_GATES_CONF="$HERE/gates.conf" SANDBOX_KEEP_ENV=FACTORY_GATES_CONF \
+        bash "$HERE/scripts/sandbox-exec.sh" "$ROOT" -- bash "$HERE/scripts/gates.sh" "$LEVEL" 2>&1)"
+STATUS=$?
+if [ "$STATUS" -eq 125 ]; then
   echo "factory stop-gates: bubblewrap unavailable; skipping in-loop gates (the gates job still decides)." >&2
   exit 0
 fi

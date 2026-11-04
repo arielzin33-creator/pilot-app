@@ -141,33 +141,36 @@ def now_utc() -> str:
 # ---------------------------------------------------------------------------------------
 
 
+# Options that make the diff describe content, whatever the repository's attributes or the
+# user's configuration say: no rename pairing (both sides of a move are classified), every
+# file counted as text (a `-diff` attribute cannot hide a rewrite), NUL-separated output (no
+# C-quoting of unusual file names), no external diff or textconv drivers.
+_DIFF_OPTS = ("--no-renames", "--text", "--no-ext-diff", "--no-textconv", "-z")
+# Attributes are read from the empty tree, so the repository's .gitattributes (for example
+# `*.ts -diff`, which makes --numstat report "-" even with --text) cannot shape the diff.
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+_GIT_DIFF = ("-c", "core.quotePath=false", f"--attr-source={EMPTY_TREE}", "diff")
+
+
 def collect_diff(root: Path, base: str) -> list[dict]:
     """Return changed files between `base` and the working tree, including untracked."""
     files: dict[str, dict] = {}
-    numstat = git(root, "diff", "--numstat", "-M", base)
-    for line in numstat.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 3:
+    numstat = git(root, *_GIT_DIFF, "--numstat", *_DIFF_OPTS, base)
+    for rec in numstat.split("\0"):
+        parts = rec.split("\t", 2)
+        if len(parts) < 3 or not parts[2]:
             continue
-        added, deleted, path = parts[0], parts[1], parts[-1]
-        if " => " in path:  # rename shown as {a => b}
-            path = re.sub(r"\{[^}]* => ([^}]*)\}", r"\1", path).replace("//", "/")
-        lines = 0 if added == "-" else int(added) + int(deleted)
-        files[path] = {"path": path, "lines": lines, "binary": added == "-"}
-    status = git(root, "diff", "--name-status", "-M", base)
-    for line in status.splitlines():
-        parts = line.split("\t")
-        if not parts or not parts[0]:
+        added, deleted, path = parts
+        binary = added == "-"
+        lines = 1 if binary else int(added) + int(deleted)
+        files[path] = {"path": path, "lines": lines, "binary": binary}
+    status = git(root, *_GIT_DIFF, "--name-status", *_DIFF_OPTS, base).split("\0")
+    for code, path in zip(status[0::2], status[1::2]):
+        if not code or not path:
             continue
-        code = parts[0][0]
-        if code == "R" and len(parts) >= 3:
-            old, new = parts[1], parts[2]
-            files.setdefault(new, {"path": new, "lines": 0, "binary": False})["status"] = "R"
-            files[new]["renamed_from"] = old
-        elif len(parts) >= 2:
-            files.setdefault(parts[1], {"path": parts[1], "lines": 0, "binary": False})["status"] = code
-    untracked = git(root, "ls-files", "--others", "--exclude-standard")
-    for path in untracked.splitlines():
+        files.setdefault(path, {"path": path, "lines": 0, "binary": False})["status"] = code[0]
+    untracked = git(root, "ls-files", "-z", "--others", "--exclude-standard")
+    for path in untracked.split("\0"):
         if not path or path in files:
             continue
         try:
@@ -175,7 +178,7 @@ def collect_diff(root: Path, base: str) -> list[dict]:
                 data = fh.read()
             lines = data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
         except OSError:
-            lines = 0
+            lines = 1
         files[path] = {"path": path, "lines": lines, "binary": False, "status": "A"}
     for f in files.values():
         f.setdefault("status", "M")
@@ -239,12 +242,13 @@ def classify_files(files: list[dict], policy: dict, pkg: dict | None = None,
         reasons.append("package.json load-bearing fields changed: " + ", ".join(pkg["load_bearing_fields"]))
         violations.append("LOAD_BEARING_TOUCHED")
 
+    # Any change to a path that held a test at base counts: modification, deletion, a move
+    # (seen as a deletion because renames are not paired) or a type change such as a symlink.
     modified_tests = [f["path"] for f in considered
-                      if f["path"] in existing_tests and f.get("status") in ("M", "D", "R")]
-    renamed_tests = [f["path"] for f in considered if f.get("renamed_from") in existing_tests]
-    if modified_tests or renamed_tests:
+                      if f["path"] in existing_tests or f.get("renamed_from") in existing_tests]
+    if modified_tests:
         tier = max(tier, 3)
-        reasons.append("existing test files modified: " + ", ".join(modified_tests + renamed_tests))
+        reasons.append("existing test files modified: " + ", ".join(modified_tests))
         violations.append("EXISTING_TEST_MODIFIED")
 
     tier2_hits = [p for p in paths if matches_any(p, policy.get("tier2_globs", []))]
@@ -295,7 +299,7 @@ def classify_files(files: list[dict], policy: dict, pkg: dict | None = None,
 
 
 def existing_test_files(root: Path, base: str, policy: dict) -> set[str]:
-    tracked = git(root, "ls-tree", "-r", "--name-only", base).splitlines()
+    tracked = git(root, "ls-tree", "-r", "-z", "--name-only", base).split("\0")
     return {p for p in tracked if matches_any(p, policy["test_globs"])}
 
 
@@ -326,7 +330,7 @@ def cmd_check_diff(args) -> int:
         fp = root / f["path"]
         if fp.is_file() and fp.stat().st_size < 2_000_000:
             secrets += scan_text_for_keys(f["path"], fp.read_text(encoding="utf-8", errors="ignore"))
-    patch = git(root, "diff", args.base, check=False)
+    patch = git(root, *_GIT_DIFF, "--text", "--no-ext-diff", "--no-textconv", args.base, check=False)
     secrets += [dict(s, path=s["path"] + " (diff)") for s in scan_text_for_keys("<patch>", patch)]
     if secrets:
         stop.append("SECRET_IN_DIFF")
@@ -362,6 +366,10 @@ def parse_handoff_body(body: str) -> dict | None:
     for line in block.splitlines():
         m = re.match(r"^\s*([a-z_]+)\s*:\s*(.*?)\s*$", line)
         if m and m.group(1) in HANDOFF_FIELDS:
+            if m.group(1) in fields:
+                # A repeated field means a value smuggled a newline (e.g. model output in
+                # files_expected). Refuse the whole handoff rather than guess which value wins.
+                return None
             fields[m.group(1)] = sanitize_untrusted(m.group(2), 500)
     return fields or None
 
@@ -504,16 +512,27 @@ def cmd_select_item(args) -> int:
     root = repo_root()
     policy = load_policy(root)
     issues = json.loads(Path(args.issues_json).read_text(encoding="utf-8"))
+    now = dt.datetime.now(dt.timezone.utc)
+    stale_h = policy["limits"]["stale_in_progress_hours"]
     eligible = []
     for issue in issues:
         labels = {(lab.get("name") if isinstance(lab, dict) else lab) for lab in issue.get("labels", [])}
         if "factory:ready-to-implement" not in labels:
             continue
-        if labels & {"factory:needs-human", "factory:human-only", "factory:in-progress"}:
+        if labels & {"factory:needs-human", "factory:human-only"}:
             continue
+        if "factory:in-progress" in labels:
+            # A claim with no activity for stale_in_progress_hours is abandoned (a run that died
+            # after claiming). It becomes eligible again; STOP_IF re-checks staleness.
+            updated = issue.get("updatedAt") or issue.get("updated_at") or ""
+            try:
+                age_h = (now - dt.datetime.fromisoformat(updated.replace("Z", "+00:00"))).total_seconds() / 3600
+            except ValueError:
+                continue
+            if age_h < stale_h:
+                continue
         eligible.append(issue)
     eligible.sort(key=lambda i: (i.get("createdAt") or i.get("created_at") or "", i.get("number", 0)))
-    _ = policy
     return emit({"number": eligible[0]["number"] if eligible else None, "eligible": len(eligible)})
 
 
@@ -732,13 +751,60 @@ def cmd_hook_guard(args) -> int:
 
 
 # ---------------------------------------------------------------------------------------
+# Settings rendering: absolute sandbox paths (spec §4.4)
+# ---------------------------------------------------------------------------------------
+
+
+def render_settings(settings: dict, root: Path, hooks_dir: str | None = None) -> dict:
+    """Return a copy of Claude Code settings with project-relative sandbox paths made absolute.
+
+    Relative `sandbox.filesystem` paths resolve against the project root in project settings
+    but have been reported to resolve against the settings file's directory when the file is
+    passed with --settings (anthropics/claude-code issue 46111). The workflow passes settings
+    that way, so every relative entry is written as an absolute path under the workspace.
+    """
+    out = json.loads(json.dumps(settings))
+    fs = ((out.get("sandbox") or {}).get("filesystem")) or {}
+    for key in ("denyWrite", "denyRead", "allowWrite", "allowRead"):
+        entries = fs.get(key)
+        if not entries:
+            continue
+        resolved = []
+        for e in entries:
+            if e.startswith(("/", "~")):
+                resolved.append(e)
+            else:
+                rel = e[2:] if e.startswith("./") else e
+                resolved.append(str((root / rel).resolve()) if rel not in ("", ".") else str(root.resolve()))
+        fs[key] = sorted(set(resolved), key=resolved.index)
+    if hooks_dir:
+        # Hooks run outside the sandbox; in factory runs they come from the trusted pre-agent
+        # copy so nothing in the agent-writable working tree is ever executed by a hook.
+        for entries in (out.get("hooks") or {}).values():
+            for entry in entries:
+                for h in entry.get("hooks", []):
+                    cmd = h.get("command", "")
+                    h["command"] = cmd.replace('"$CLAUDE_PROJECT_DIR/.factory/hooks/', f'"{hooks_dir.rstrip("/")}/')
+    return out
+
+
+def cmd_render_settings(args) -> int:
+    root = Path(args.root).resolve() if args.root else repo_root()
+    settings = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    rendered = render_settings(settings, root, args.hooks_dir)
+    Path(args.out).write_text(json.dumps(rendered, indent=2) + "\n", encoding="utf-8")
+    deny = (((rendered.get("sandbox") or {}).get("filesystem")) or {}).get("denyWrite", [])
+    return emit({"status": "OK", "out": args.out, "denyWrite": deny})
+
+
+# ---------------------------------------------------------------------------------------
 # Configuration hashes (spec §4.4 rule 4: bind approvals to content, not names)
 # ---------------------------------------------------------------------------------------
 
 
 def config_files(root: Path, policy: dict) -> list[str]:
-    tracked = git(root, "ls-files").splitlines()
-    return sorted(p for p in tracked
+    tracked = git(root, "ls-files", "-z").split("\0")
+    return sorted(p for p in tracked if p
                   if matches_any(p, policy["config_hash_globs"]) and p != HASHES_REL)
 
 
@@ -808,8 +874,8 @@ def scan_text_for_keys(path: str, text: str) -> list[dict]:
 
 def cmd_scan_keys(args) -> int:
     root = repo_root()
-    tracked = git(root, "ls-files").splitlines()
-    candidates = tracked + [p for p in git(root, "ls-files", "--others", "--exclude-standard").splitlines()]
+    tracked = git(root, "ls-files", "-z").split("\0")
+    candidates = [p for p in tracked + git(root, "ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
     findings = []
     for rel in sorted(set(candidates)):
         if rel.startswith("tests/fixtures/") or rel.endswith((".png", ".jpg", ".pdf", ".lock")):
@@ -1043,6 +1109,13 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("hook-guard", help="PreToolUse hook: reads hook JSON on stdin; exit 2 blocks")
     s.set_defaults(fn=cmd_hook_guard)
+
+    s = sub.add_parser("render-settings", help="write Claude Code settings with absolute sandbox paths")
+    s.add_argument("--in", dest="input", required=True)
+    s.add_argument("--out", required=True)
+    s.add_argument("--root", help="workspace root (default: git top-level)")
+    s.add_argument("--hooks-dir", help="run hook scripts from this (trusted) directory")
+    s.set_defaults(fn=cmd_render_settings)
 
     s = sub.add_parser("config-hashes", help="check (default) or --update configuration hashes")
     s.add_argument("--update", action="store_true")

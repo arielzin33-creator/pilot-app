@@ -114,7 +114,8 @@ PR_URL="$(gh pr create -R "$REPO" --draft --base "$(gh repo view "$REPO" --json 
 PR_NUMBER="${PR_URL##*/}"
 echo "$PR_NUMBER" > "$EV/pr-number.txt"
 
-GATES_STATE="failure"; grep -q 'status=GREEN' "$EV/gates.txt" && GATES_STATE="success"
+# Only the leading, workflow-written verdict counts (text after "|" is the raw log line).
+GATES_STATE="failure"; grep -q '^FACTORY_GATES: level=[a-z]* status=GREEN exit=0 ' "$EV/gates.txt" && GATES_STATE="success"
 gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$GATES_STATE" -f context="factory/gates" \
   -f description="$(cut -c1-140 "$EV/gates.txt")" >/dev/null
 

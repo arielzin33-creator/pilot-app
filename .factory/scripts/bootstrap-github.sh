@@ -2,7 +2,8 @@
 # bootstrap-github.sh - one-time repository setup, run by the owner with their own gh login.
 # Creates the factory labels and a branch ruleset on the default branch:
 #   pull request required, 1 approval, code-owner review, stale approvals dismissed,
-#   required status check factory/gates, no force push, no deletion.
+#   required status check factory/gates from the GitHub Actions app only (integration 15368,
+#   so another app or a user token cannot post it), no force push, no deletion.
 #   Bypass: repository admins, through pull requests only (a solo owner can merge their own
 #   human PRs). Agents and the Actions bot are not admins and cannot bypass.
 # Optional: --seed <issues.json> creates seed issues labeled factory:inbox.
@@ -52,7 +53,7 @@ cat > /tmp/factory-ruleset.json <<JSON
         "required_review_thread_resolution": false } },
     { "type": "required_status_checks", "parameters": {
         "strict_required_status_checks_policy": false,
-        "required_status_checks": [ { "context": "factory/gates" } ] } }
+        "required_status_checks": [ { "context": "factory/gates", "integration_id": 15368 } ] } }
   ]
 }
 JSON

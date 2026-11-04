@@ -122,7 +122,12 @@
         ".factory",
         ".claude",
         "docs/factory/CHARTER.md",
-        "docs/factory/CONTRACT.md"
+        "docs/factory/CONTRACT.md",
+        ".git",
+        ".gitattributes",
+        "package.json",
+        "tsconfig.json",
+        "eslint.config.mjs"
       ]
     },
     "network": {

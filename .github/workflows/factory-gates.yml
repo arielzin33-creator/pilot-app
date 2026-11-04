@@ -1,9 +1,13 @@
 # factory-gates: the required status check `factory/gates` for every pull request and for the
 # default branch (STOP_IF uses the default branch status: BASE_NOT_GREEN).
 #
-# Runs with a read-only token plus statuses: write. No secrets, no agent.
-# Note: pull requests opened by the factory with the job token do not trigger workflows; the
-# publish job posts the same status itself. Human pushes and "ready for review" re-run this.
+# Two jobs, so the code under test never shares a job with a write credential:
+#   gates   contents: read only. Factory scripts come from the BASE commit, never the PR head.
+#           Dependencies install without scripts; gates run in sandbox-exec.sh (no network,
+#           read-only filesystem except the checkout). Writes verdict.json as an artifact.
+#   status  statuses: write only. No checkout, no project code: reads the verdict and posts it.
+# Pull requests opened by the factory with the job token do not trigger workflows; the publish
+# job posts the same status itself. Human pushes and "ready for review" re-run this.
 
 name: factory-gates
 
@@ -22,59 +26,110 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      statuses: write
     env:
       HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Trusted factory scripts from the base commit
+        run: |
+          mkdir -p "$RUNNER_TEMP/trusted" "$RUNNER_TEMP/out"
+          git archive "$BASE_SHA" .factory | tar -x -C "$RUNNER_TEMP/trusted"
+          test -f "$RUNNER_TEMP/trusted/.factory/scripts/gates.sh"
+      - name: Classify, configuration hashes and key scan (base engine)
+        id: cls
+        env:
+          FACTORY_POLICY: ${{ runner.temp }}/trusted/.factory/policy.json
+          GIT_ATTR_SOURCE: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+        run: |
+          PY="python3 -I $RUNNER_TEMP/trusted/.factory/scripts/factory.py"
+          level=full
+          if [ "$BASE_SHA" != "$HEAD_SHA" ]; then
+            $PY classify --base "$BASE_SHA" > "$RUNNER_TEMP/out/classify.json" || true
+            level="$(python3 -I -c 'import json,sys
+          try: print(json.load(open(sys.argv[1]))["gate_level"])
+          except Exception: print("deep")' "$RUNNER_TEMP/out/classify.json")"
+          fi
+          set +e
+          $PY config-hashes; h=$?
+          $PY scan-keys; k=$?
+          set -e
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+          echo "trust_ok=$([ $h -eq 0 ] && [ $k -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - run: npm ci
-      - name: Classify the change (pull requests)
-        id: cls
+      - name: Dependencies (no install scripts) and sandbox
         run: |
-          level=full
-          if [ -n "$BASE_SHA" ]; then
-            git fetch --quiet --depth 1 origin "$BASE_SHA" || true
-            python3 -I .factory/scripts/factory.py classify --base "$BASE_SHA" | tee "$RUNNER_TEMP/classify.json"
-            level="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate_level"])' "$RUNNER_TEMP/classify.json")"
-          fi
-          echo "level=$level" >> "$GITHUB_OUTPUT"
-      - name: Configuration hashes and key scan
-        id: trust
-        run: |
-          set +e
-          python3 -I .factory/scripts/factory.py config-hashes; h=$?
-          python3 -I .factory/scripts/factory.py scan-keys; k=$?
-          set -e
-          echo "ok=$([ $h -eq 0 ] && [ $k -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - name: Gates
-        id: gates
+          npm ci --ignore-scripts
+          # Dependency audit outside the sandbox (needs the registry; runs no project code).
+          if npm audit --audit-level=high >/dev/null 2>&1; then echo "FACTORY_AUDIT_STATUS=pass" >> "$GITHUB_ENV"
+          else echo "FACTORY_AUDIT_STATUS=fail" >> "$GITHUB_ENV"; fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Gates (sandboxed; verdict from the trusted script's exit code)
         env:
           LEVEL: ${{ steps.cls.outputs.level }}
+          TRUST_OK: ${{ steps.cls.outputs.trust_ok }}
+          FACTORY_GATES_CONF: ${{ runner.temp }}/trusted/.factory/gates.conf
+          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF FACTORY_AUDIT_STATUS
+          SANDBOX_RO_GIT: "1"
         run: |
           set +e
-          ./.factory/scripts/gates.sh "$LEVEL" | tee "$RUNNER_TEMP/gates.log"
+          bash "$RUNNER_TEMP/trusted/.factory/scripts/sandbox-exec.sh" "$GITHUB_WORKSPACE" -- \
+            bash "$RUNNER_TEMP/trusted/.factory/scripts/gates.sh" "$LEVEL" > "$RUNNER_TEMP/gates.log" 2>&1
+          code=$?
           set -e
-          line="$(grep '^FACTORY_GATES:' "$RUNNER_TEMP/gates.log" | tail -1)"
-          echo "line=${line:-FACTORY_GATES: status=MISCONFIGURED reason=no-verdict-line}" >> "$GITHUB_OUTPUT"
-      - name: Post factory/gates status
+          cat "$RUNNER_TEMP/gates.log"
+          case "$code" in 0) status=GREEN ;; 1) status=RED ;; *) status=MISCONFIGURED ;; esac
+          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || status=MISCONFIGURED
+          python3 -I - "$status" "$code" "$LEVEL" "$TRUST_OK" "$HEAD_SHA" > "$RUNNER_TEMP/out/verdict.json" <<'EOF'
+          import json, sys
+          status, code, level, trust, sha = sys.argv[1:6]
+          ok = status == "GREEN" and trust == "true"
+          desc = f"FACTORY_GATES level={level} status={status} exit={code}"
+          if trust != "true":
+              desc = "config hash or key scan failed; " + desc
+          print(json.dumps({"state": "success" if ok else "failure", "description": desc[:139], "sha": sha}))
+          EOF
+          cat "$RUNNER_TEMP/out/verdict.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
+        with:
+          name: factory-gates-verdict-${{ github.run_id }}
+          path: ${{ runner.temp }}/out/verdict.json
+          retention-days: 14
+
+  status:
+    needs: gates
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        continue-on-error: true
+        with:
+          name: factory-gates-verdict-${{ github.run_id }}
+          path: ${{ runner.temp }}/v
+      - name: Post factory/gates status
         env:
           GH_TOKEN: ${{ github.token }}
-          LINE: ${{ steps.gates.outputs.line }}
-          TRUST_OK: ${{ steps.trust.outputs.ok }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO: ${{ github.repository }}
         run: |
-          state=failure
-          case "$LINE" in *status=GREEN*) [ "$TRUST_OK" = "true" ] && state=success ;; esac
-          desc="$LINE"; [ "$TRUST_OK" = "true" ] || desc="config hash or key scan failed; $LINE"
-          gh api -X POST "repos/${{ github.repository }}/statuses/$HEAD_SHA" -f state="$state" \
-            -f context="factory/gates" -f description="${desc:0:139}" >/dev/null || \
+          state=failure; desc="no verdict (gates job failed or was cancelled)"
+          if [ -f "$RUNNER_TEMP/v/verdict.json" ]; then
+            read -r state desc < <(python3 -I -c 'import json,sys
+          d=json.load(open(sys.argv[1])); ok=d.get("state")=="success" and d.get("sha")==sys.argv[2]
+          print(("success" if ok else "failure") + " " + str(d.get("description",""))[:139])' "$RUNNER_TEMP/v/verdict.json" "$HEAD_SHA")
+          fi
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$state" \
+            -f context="factory/gates" -f description="$desc" >/dev/null || \
             echo "::warning::could not post status (fork pull request?)"
           [ "$state" = "success" ]

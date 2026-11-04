@@ -111,6 +111,8 @@ jobs:
           print("turns=" + str(p["limits"]["triage_run_max_turns"]))
           EOF
           echo "TRIAGE_SCHEMA=$(cat .factory/schemas/triage.schema.min.json)" >> "$GITHUB_ENV"
+          python3 -I .factory/scripts/factory.py render-settings --in .factory/verifier-settings.json \
+            --out "$RUNNER_TEMP/t/settings.json" --root "$GITHUB_WORKSPACE"
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap socat >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Triage agent (read-only)
@@ -123,7 +125,7 @@ jobs:
           anthropic_service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           anthropic_workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
           prompt: ${{ steps.render.outputs.prompt }}
-          settings: .factory/verifier-settings.json
+          settings: ${{ runner.temp }}/t/settings.json
           display_report: "false"
           claude_args: >-
             --model ${{ steps.render.outputs.model }}
@@ -175,13 +177,16 @@ jobs:
             [ -d "$dir" ] || continue
             ISSUE="${dir##*-}"
             python3 -I - "$dir" "$ISSUE" <<'EOF'
-          import json, subprocess, sys, datetime as dt, pathlib
+          import json, re, subprocess, sys, datetime as dt, pathlib
           d, issue = pathlib.Path(sys.argv[1]), sys.argv[2]
           try:
               t = json.loads((d / "triage.json").read_text())
           except Exception:
               t = {}
-          files = [f for f in t.get("files_expected", []) if isinstance(f, str)]
+          # Model output: one path per entry, no whitespace or commas (a newline here could
+          # otherwise forge extra handoff lines; the parser also rejects repeated fields).
+          files = [f.strip() for f in t.get("files_expected", []) or []
+                   if isinstance(f, str) and f.strip() and not re.search(r"[\s,]", f.strip())]
           pred = json.loads(subprocess.run(
               ["python3", "-I", ".factory/scripts/factory.py", "predict-tier", "--files", ",".join(files)],
               capture_output=True, text=True).stdout or "{}")

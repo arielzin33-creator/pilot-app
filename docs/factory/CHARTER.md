@@ -40,9 +40,15 @@ interactive session if Claude helps, and merged under CODEOWNERS. See `DECISIONS
 Listed in `.factory/policy.json` under `load_bearing`. They include authentication, payments,
 migrations and SQL, all factory configuration (`.factory/**`, `.claude/**`, `.github/**`,
 `AGENTS.md`, `CLAUDE.md`, this charter, the contract), environment files, infrastructure, and
-the test, lint and type-check configuration that the gates execute. `package.json` fields
-`scripts`, `engines`, `packageManager`, `overrides` and `workspaces` are load-bearing because
-`gates.sh` runs them.
+the test, lint, type-check, coverage and transpiler configuration that the gates execute or
+read (for example `tsconfig*.json`, `eslint.config.*`, `vitest.config.*`, `vite.config.*`,
+`jest.config.*`, `.mocharc*`, `babel.config.*`, test setup files, `pyproject.toml`,
+`conftest.py`), Git attribute and hook files (`.gitattributes`, `.gitmodules`, `.husky/**`),
+and the `package.json` fields `scripts`, `engines`, `packageManager`, `overrides`,
+`workspaces`, `jest`, `mocha`, `ava`, `c8`, `nyc`, `eslintConfig`, `babel` and `vitest`.
+
+Moving or deleting a load-bearing file is a change to it: the classifier does not pair
+renames, so both sides of a move are classified.
 
 An agent that can rewrite its own gates has no constraints. Gate configuration is on this list
 because agents in one observed 2026 factory authored 40 of 58 CI-changing pull requests and
@@ -54,7 +60,8 @@ loosened 7 checks (spec §12, HIST-44).
 TESTS_ARE_LOAD_BEARING: true
 ```
 
-An unattended run never modifies, renames or deletes an existing test file. Adding a new test
+An unattended run never modifies, renames, deletes or replaces (for example with a symlink)
+an existing test file. Adding a new test
 file is required for Tier 1 bug fixes and allowed elsewhere. Agents rewrite assertions to match
 broken behavior; an unexplained green suite after an agent edited tests is weak evidence.
 
@@ -99,7 +106,15 @@ DONE:
   - the PR body explains why the change is safe, in words a reviewer can check
 ```
 
-Documentation-only changes (Tier 0, `fast` gates) are exempt from the failing-test proof.
+The failing-test proof is not required, and the evidence pack says so (`PROOF:
+status=NOT_REQUIRED` with the reason), for:
+
+- Tier 0 changes: documentation only, or dependency version bumps with no other change. There
+  is no behaviour change for a test to pin down.
+- Changes that only add new test files. There is no non-test change to revert; the reviewer
+  judges whether the new tests are meaningful.
+
+A proof that cannot run is `MISCONFIGURED`, never a pass.
 
 ## 6. Gate level by change type
 
@@ -126,14 +141,14 @@ workflow reports; every code is exercised by `tests/`.
 | `BASE_NOT_GREEN` | gates on the default branch are not green |
 | `NO_ITEM` | nothing is ready to implement |
 | `NEEDS_HUMAN_LABEL` | the item carries `factory:needs-human` or `factory:human-only` |
-| `CLAIMED_ELSEWHERE` | the item is in progress and not stale |
+| `CLAIMED_ELSEWHERE` | the item carries `factory:in-progress` (set by the run that claimed it) and the claim is less than `stale_in_progress_hours` old |
 | `HANDOFF_MISSING` | no trusted triage handoff on the issue |
 | `AMBIGUOUS` | the handoff lacks `done_when` or expected files, or confidence is low |
 | `LOAD_BEARING_EXPECTED` | the expected files include a load-bearing path |
 | `TIER_NOT_UNATTENDED` | the predicted or labeled tier exceeds the unattended maximum |
 | `RED_GATES_TWICE` | gates were red twice on this item |
 | `TOO_MANY_RUNS` | three runs on this item |
-| `TOO_MANY_CI_FIX` | three CI-fix commits on this item |
+| `TOO_MANY_CI_FIX` | three CI-fix commits on this item. *Reserved:* Phase A has no CI-fix loop (the factory does not push follow-up commits to its PRs), so the count is always 0; the code is tested and takes effect when Phase B adds the loop. |
 
 After a run, the diff policy can also stop publication: `LOAD_BEARING_TOUCHED`,
 `EXISTING_TEST_MODIFIED`, `TIER_ABOVE_UNATTENDED`, `DIFF_TOO_LARGE`, `EMPTY_DIFF`,

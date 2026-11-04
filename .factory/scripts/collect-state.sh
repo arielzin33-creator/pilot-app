@@ -24,7 +24,7 @@ fi
 # Select the item.
 if [ "$ISSUE_IN" = "auto" ]; then
   gh issue list -R "$REPO" --state open --label factory:ready-to-implement \
-    --json number,labels,createdAt --limit 100 > "$OUT/candidates.json"
+    --json number,labels,createdAt,updatedAt --limit 100 > "$OUT/candidates.json"
   ISSUE="$($PY select-item --issues-json "$OUT/candidates.json" | python3 -I -c 'import json,sys; n=json.load(sys.stdin)["number"]; print(n if n else "")')"
 else
   ISSUE="$ISSUE_IN"
@@ -81,7 +81,7 @@ if os.environ["ISSUE"]:
         "labels": [l["name"] for l in issue.get("labels", [])],
         "handoff": handoff,
         "runs": spend.get("item_runs", []),
-        "ci_fix_commits": 0,
+        "ci_fix_commits": 0,  # reserved: Phase A has no CI-fix loop (CHARTER §7, TOO_MANY_CI_FIX)
         "in_progress_since_hours": hours,
     }
 json.dump(state, open(f"{out}/state.json", "w"), indent=2)

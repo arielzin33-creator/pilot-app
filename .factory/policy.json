@@ -3,11 +3,9 @@
   "factory_phase": "A",
   "charter_status": "draft",
   "_comment": "Machine-readable copy of docs/factory/CHARTER.md. Load-bearing: agents never edit this file. Change it only in a human PR reviewed under CODEOWNERS, then run `python3 .factory/scripts/factory.py config-hashes --update`.",
-
   "unattended_max_tier": 1,
   "tier3_unattended": false,
   "second_reviewer_available": false,
-
   "load_bearing": [
     "src/auth/**",
     "src/payments/**",
@@ -33,15 +31,59 @@
     "jest.config.*",
     "playwright.config.*",
     ".npmrc",
-    ".nvmrc"
+    ".nvmrc",
+    ".gitattributes",
+    "**/.gitattributes",
+    ".gitmodules",
+    ".husky/**",
+    ".githooks/**",
+    "vite.config.*",
+    "vitest.workspace.*",
+    "**/vitest.setup.*",
+    "**/jest.setup.*",
+    "**/setupTests.*",
+    ".mocharc*",
+    "babel.config.*",
+    ".babelrc*",
+    "karma.conf.*",
+    "cypress.config.*",
+    ".c8rc*",
+    ".nycrc*",
+    "jsconfig*.json",
+    "pyproject.toml",
+    "setup.cfg",
+    "pytest.ini",
+    "tox.ini",
+    "**/conftest.py",
+    ".pnpmfile.cjs",
+    ".yarnrc*",
+    "bunfig.toml",
+    "ava.config.*",
+    ".taprc",
+    "stryker.conf.*",
+    "stryker.config.*",
+    "webpack.config.*",
+    "rollup.config.*",
+    "esbuild.config.*",
+    ".swcrc",
+    "turbo.json",
+    "nx.json"
   ],
-  "_load_bearing_package_json_fields": "Changes to these package.json fields are load-bearing because gates.sh runs them: scripts, engines, packageManager, overrides, workspaces.",
+  "_load_bearing_package_json_fields": "Changes to these package.json fields are load-bearing because the gates run them or read them: scripts, engines, packageManager, overrides, workspaces, and embedded test, coverage, lint and transpiler configuration.",
   "load_bearing_package_json_fields": [
     "scripts",
     "engines",
     "packageManager",
     "overrides",
-    "workspaces"
+    "workspaces",
+    "jest",
+    "mocha",
+    "ava",
+    "c8",
+    "nyc",
+    "eslintConfig",
+    "babel",
+    "vitest"
   ],
   "config_hash_globs": [
     ".factory/**",
@@ -86,7 +128,6 @@
     "pnpm-lock.yaml",
     "yarn.lock"
   ],
-
   "limits": {
     "tier1_max_changed_lines": 400,
     "tier1_max_files": 5,
@@ -106,7 +147,6 @@
     "prompt_max_untrusted_chars": 8000,
     "ledger_reconcile_tolerance_pct": 10
   },
-
   "gates": {
     "docs_only": "fast",
     "tier0": "full",
@@ -114,20 +154,17 @@
     "tier2": "full",
     "tier3": "deep"
   },
-
   "models": {
-    "_comment": "The verifier uses a different model from the implementer (writer never grades its own work; spec §5).",
+    "_comment": "The verifier uses a different model from the implementer (writer never grades its own work; spec \u00a75).",
     "triage": "claude-sonnet-5-5",
     "implementer": "claude-sonnet-5-5",
     "verifier": "claude-opus-5-5"
   },
-
   "runtime": {
     "claude_code_version": "2.1.318",
     "claude_code_version_floor": "2.1.307",
     "claude_code_action_sha": "c0949c50a78c1ec8ce2647db36629b870e715d0c"
   },
-
   "trusted_handoff_authors": [
     "github-actions[bot]"
   ],
