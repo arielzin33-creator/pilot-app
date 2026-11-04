@@ -47,6 +47,7 @@ if ! git push --quiet origin "HEAD:refs/heads/$BRANCH" 2>/dev/null; then
   exit 3
 fi
 HEAD_SHA="$(git rev-parse HEAD)"
+echo "$HEAD_SHA" > "$EV/head-sha.txt"   # auto-merge binds its decision to this exact commit
 
 python3 -I - "$EV" > "$EV/pr-body.md" <<'EOF'
 import json, sys, pathlib

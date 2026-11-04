@@ -1,0 +1,172 @@
+# factory-automerge: merge pull requests of QUALIFIED Tier 0 classes only (spec §9.6, ADR-05;
+# owner decision 2026-11-04). Off until policy.json auto_merge.enabled is true and a class is
+# qualified by a human decision. Revocation is automatic (see automerge.py).
+#
+#   evaluate  read-only token; re-classifies each candidate PR with the trusted engine (git only,
+#             never the PR's code) and decides from the ledger record of the publishing run, the
+#             factory-gates run for the exact commit (Dependabot), escapes, reverts and red team.
+#   merge     a dedicated merge GitHub App (ruleset bypass actor; key held in the factory-merge
+#             environment) merges exactly the classified commit through the REST API (sha=).
+#             Every Nth merge opens a post-merge review issue.
+#   audit     daily: auto-merged PRs older than the audit window are listed in an audit checklist
+#             issue for a human to tick. Labelled factory:audit-opened, not "audited".
+#
+# Runs only from the default branch: a dispatch on any other ref is skipped.
+
+name: factory-automerge
+
+on:
+  schedule:
+    - cron: "11,41 6-20 * * *"
+    - cron: "52 5 * * *"            # daily audit
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: factory-automerge
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: read                  # workflow runs and jobs (ledger provenance, Dependabot gates)
+    outputs:
+      merges: ${{ steps.decide.outputs.merges }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0              # read-only token persisted: this job fetches PR heads (git only)
+      - name: Trusted engine and policy from the default branch
+        run: |
+          cp -R .factory "$RUNNER_TEMP/trusted"
+          echo "FACTORY_POLICY=$RUNNER_TEMP/trusted/policy.json" >> "$GITHUB_ENV"
+          echo "FACTORY_SCRIPTS=$RUNNER_TEMP/trusted/scripts" >> "$GITHUB_ENV"
+      - name: Decide
+        id: decide
+        run: |
+          enabled="$(python3 -I -c 'import json,os; print(str((json.load(open(os.environ["FACTORY_POLICY"])).get("auto_merge") or {}).get("enabled", False)).lower())')"
+          echo "## Auto-merge evaluation (enabled: $enabled)" >> "$GITHUB_STEP_SUMMARY"
+          echo '[]' > "$RUNNER_TEMP/merges.json"
+          if [ "$enabled" != "true" ]; then
+            echo "Auto-merge is disabled in policy.json; nothing evaluated." >> "$GITHUB_STEP_SUMMARY"
+            echo "merges=[]" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          gh pr list -R "$GITHUB_REPOSITORY" --state open --base "${{ github.event.repository.default_branch }}" \
+            --limit 50 --json number,headRefName --jq '.[] | select((.headRefName | startswith("claude/fq-")) or (.headRefName | startswith("dependabot/"))) | .number' > "$RUNNER_TEMP/candidates.txt"
+          while read -r n; do
+            [ -n "$n" ] || continue
+            d="$RUNNER_TEMP/pr-$n"
+            bash "$FACTORY_SCRIPTS/automerge-collect.sh" pr "$n" "$d" || { echo "- #$n: evidence collection failed (human review)" >> "$GITHUB_STEP_SUMMARY"; continue; }
+            set +e
+            python3 -I "$FACTORY_SCRIPTS/automerge.py" decide --classify-json "$d/classify.json" --pr-json "$d/pr.json" --evidence-json "$d/evidence.json" > "$d/decision.json"
+            set -e
+            python3 -I - "$n" "$d/decision.json" "$RUNNER_TEMP/merges.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          n, path, accp = sys.argv[1], sys.argv[2], sys.argv[3]
+          try:
+              d = json.load(open(path))
+              acc = json.load(open(accp))
+              print(f"- #{n}: class {d.get('class') or 'none'} -> {'MERGE' if d.get('merge') else 'human review'}"
+                    + ("" if d.get("merge") else f" ({'; '.join(map(str, d.get('reasons') or []))[:400]})"))
+              if d.get("merge") is True and str(d.get("pr")) == n:
+                  acc.append({"pr": d["pr"], "sha": d["head_sha"], "class": d["class"],
+                              "review": bool(d.get("post_merge_review")), "every": int(d.get("sample_every") or 5)})
+              json.dump(acc, open(accp, "w"))
+          except Exception as exc:   # an unreadable decision is a human review, never a crash
+              print(f"- #{n}: decision unreadable ({type(exc).__name__}); human review")
+          PY
+          done < "$RUNNER_TEMP/candidates.txt"
+          echo "merges=$(python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$RUNNER_TEMP/merges.json")" >> "$GITHUB_OUTPUT"
+
+  merge:
+    needs: evaluate
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      needs.evaluate.outputs.merges != '' && needs.evaluate.outputs.merges != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: factory-merge       # the merge App key is an environment secret here (default branch only)
+    permissions: {}
+    steps:
+      - name: Merge identity (dedicated GitHub App, ruleset bypass actor)
+        id: merge-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_MERGE_APP_ID }}
+          private-key: ${{ secrets.FACTORY_MERGE_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Merge exactly the classified commits
+        env:
+          GH_TOKEN: ${{ steps.merge-token.outputs.token }}
+          MERGES: ${{ needs.evaluate.outputs.merges }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          printf '%s' "$MERGES" > "$RUNNER_TEMP/m.json"
+          python3 -I -c 'import json,re,sys
+          for m in json.load(open(sys.argv[1])):
+              assert str(m["pr"]).isdigit() and re.fullmatch(r"[0-9a-f]{40}", m["sha"]) and re.fullmatch(r"[a-z0-9-]+", m["class"])
+              print(m["pr"], m["sha"], m["class"], str(m["review"]).lower(), int(m["every"]))' "$RUNNER_TEMP/m.json" > "$RUNNER_TEMP/m.txt"
+          failed=0
+          while read -r pr sha cls review every; do
+            # Re-check base, head, state and blocking labels immediately before merging.
+            now="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '"\(.base.ref) \(.head.sha) \(.state) \([.labels[].name | select(. == "factory:needs-human" or . == "factory:human-only" or . == "factory:no-auto-merge" or . == "factory:rejected")] | length)"')"
+            if [ "$now" != "$DEFAULT_BRANCH $sha open 0" ]; then
+              echo "::warning::#$pr changed since evaluation ($now); left for the next evaluation"; continue
+            fi
+            gh pr ready "$pr" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || true
+            if gh api -X PUT "repos/$GITHUB_REPOSITORY/pulls/$pr/merge" -f sha="$sha" -f merge_method=squash >/dev/null; then
+              gh pr edit "$pr" -R "$GITHUB_REPOSITORY" --add-label factory:auto-merged --add-label "factory:class-$cls" || true
+              gh pr comment "$pr" -R "$GITHUB_REPOSITORY" --body "Auto-merged under qualified class \`$cls\` (spec §9.6) at commit \`$sha\`. Evidence: $RUN_URL" || true
+              if [ "$review" = "true" ]; then
+                gh issue create -R "$GITHUB_REPOSITORY" --label factory:sampled-review \
+                  --title "Post-merge review: #$pr (class $cls)" \
+                  --body "Sampled post-merge review (about one in $every auto-merged PRs, spec §9.6 rule 6). Read #$pr. If it was wrong, open an issue labelled factory:escape whose body says \`Escaped from #$pr\`: that revokes the class automatically. Close this issue when reviewed."
+              fi
+            else
+              echo "::error::merge of #$pr at $sha failed"; failed=1
+            fi
+          done < "$RUNNER_TEMP/m.txt"
+          exit "$failed"
+
+  audit:
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event.schedule == '52 5 * * *' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Escape audit checklist for auto-merged pull requests
+        run: |
+          days="$(python3 -I -c 'import json; print(int(((json.load(open(".factory/policy.json")).get("auto_merge") or {}).get("qualification") or {}).get("audit_days", 14)))')"
+          cutoff="$(date -u -d "$days days ago" +%F)"
+          list="$(gh pr list -R "$GITHUB_REPOSITORY" --state merged --label factory:auto-merged --limit 200 --json number,mergedAt,labels \
+            --jq "[.[] | select(.mergedAt[:10] <= \"$cutoff\") | select([.labels[].name] | index(\"factory:audit-opened\") | not) | .number] | map(tostring) | join(\" \")")"
+          [ -n "$list" ] || { echo "Nothing to audit." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          body="Escape audit (spec §9.6): these auto-merged pull requests are at least $days days old. A human confirms for each that no defect escaped. If one did, open an issue labelled \`factory:escape\` with \`Escaped from #<number>\` in its body: the class is revoked automatically."
+          for n in $list; do body="$body"$'\n'"- [ ] #$n"; done
+          gh issue create -R "$GITHUB_REPOSITORY" --label factory:retro --title "Auto-merge escape audit ($(date -u +%F))" --body "$body"
+          for n in $list; do gh pr edit "$n" -R "$GITHUB_REPOSITORY" --add-label factory:audit-opened >/dev/null; done

@@ -26,7 +26,7 @@ touches. A human label `factory:tier-N` can raise a tier; nothing can lower it.
 
 | Tier | Definition | Human gate | Gate level | Unattended in Phase A |
 |---|---|---|---|---|
-| 0 Mechanical | Documentation only; dependency version bumps with no new dependency | One human merges on evidence | `fast` (docs) or `full` | Yes |
+| 0 Mechanical | Documentation only; dependency version bumps with no new dependency | One human merges on evidence. A narrowly defined Tier 0 class may auto-merge after qualification (section 11) | `fast` (docs) or `full` | Yes |
 | 1 Bounded change | Bug fix or small feature in one module; at most 5 files and 400 changed lines; no load-bearing path; acceptance criteria present | One human reads the evidence pack and merges | `full` | Yes |
 | 2 Feature | UI files, public API, more than 5 files or 400 lines (up to 15 files and 1,200 lines), new or removed dependency | Spec, plan and tasks approved by a human first; one human reviewer merges | `ui`: `full` plus end-to-end click-through with traces and screenshots | **Only with an approved spec** (Phase B; `SPEC_NOT_APPROVED` otherwise) |
 | 3 Load-bearing | Any path in `load_bearing`, `package.json` scripts or engines, test and lint configuration, existing test files | Two independent human approvals | `deep` | **Never** |
@@ -82,7 +82,7 @@ NEEDS_SPEC:
   - Anything touching more than 5 files or 400 lines
 
 NEVER_AUTOMATE:
-  - Merge decisions
+  - Merge decisions, except Tier 0 classes qualified under section 11
   - Changes to load-bearing paths
   - Architectural direction and dependency choices
   - Product intent: whether a feature should exist at all
@@ -196,3 +196,75 @@ NEXT_REVIEW: <YYYY-MM-DD>
 | What may it touch? | Tier 0–1 paths; Tier 2 only with an approved spec. Never load-bearing paths (section 2) or existing tests (section 3). Enforced by the guard hook, the sandbox and the diff policy. |
 | What stops it? | The STOP_IF conditions in section 7, the per-run and daily budgets in section 8, the wall-clock timeout, and the pause switch (`FACTORY_PAUSED`). |
 | Who signs off on what cannot be taken back? | The owner merges every pull request. Production deployments wait for the owner's approval on the `production` environment. Migrations, authentication, payments and CI changes are made by humans only. |
+
+## 11. Qualified auto-merge (spec §9.6; owner decision 2026-11-04)
+
+```
+AUTO_MERGE: off              # policy.json auto_merge.enabled; a human turns it on
+CLASSES: docs (factory), dependency-patch (Dependabot); both "candidate"
+```
+
+A Tier 0 class may be merged by the factory, without a human approval, only when all of these
+hold:
+
+1. **Narrow class.** One change type, one path pattern, one producer (`policy.json`
+   `auto_merge.classes`). Tier 1–3 never auto-merge in 0.x. Load-bearing paths never belong to a
+   class. Factory PRs count only when authored by a login in `auto_merge.factory_authors`. Files
+   that coding agents load as instructions (`CLAUDE*.md`, `AGENTS*.md`, `GEMINI*.md`, `.claude/`,
+   `.github/copilot-instructions.md` and similar, at any depth) never auto-merge, whatever the
+   class says.
+2. **Qualification window.** At least 50 consecutive merged PRs in the class, each approved by a
+   human, each merged at least 14 days before the report. A PR in the class closed without merging
+   breaks the run. An escape or revert of any PR in the class starts a new window after its date.
+   Run `factory-qualify`.
+3. **Eval evidence** (factory-produced classes). pass^k on the class's eval tasks at or above the
+   human acceptance rate, on the current implementer model and a harness naming the current
+   Claude Code version, with no canary cheats.
+4. **Budgets.** Mean cost per PR, publish success rate (over every implement run in the window
+   period, including runs that produced no PR) and open sampled reviews within the class limits.
+5. **Human decision.** The owner sets `status: qualified`, `qualified_on`, `decision_ref`,
+   `window_prs` and the full pinned `runtime` (models for triage, implementer and verifier, Claude
+   Code version, action SHA) in `policy.json`, and records the evidence in `DECISIONS.md`, in one
+   reviewed pull request. Then `auto_merge.enabled: true`. A class marked qualified without the full
+   pin is refused.
+6. **Sampled review.** About one in five auto-merged PRs gets a post-merge review issue. The
+   choice is deterministic from the PR number and repository id: reproducible and auditable, but
+   predictable, so it is not a defence against someone who knows which PRs will be sampled. Each
+   day, auto-merged PRs older than 14 days are listed in an escape-audit checklist issue, which a
+   human works through; the label `factory:audit-opened` means listed, not checked.
+7. **Automatic revocation.** Any of the following returns the class to human review at the next
+   decision, without anyone editing policy:
+   - an escape (`factory:escape` issue saying `Escaped from #N`) or a revert (GitHub's revert
+     button: `Revert "…"`, body `Reverts owner/repo#N`) of a PR in the class's `window_prs` or of
+     one it auto-merged; an escape issue that names no PR revokes every class once it postdates
+     qualification;
+   - a change of any pinned model, Claude Code version or action SHA in policy;
+   - a run whose ledger record shows a different implementer or verifier model, Claude Code
+     version or action SHA, or does not show them at all;
+   - a red-team failure, or an unknown red-team state.
+   Requalification sets a new `qualified_on`.
+
+Each merge happens only if:
+- the trusted engine, from the default branch, re-classifies the PR into the class, and the raw
+  diff (every changed path, including paths the tier classifier ignores) equals the classified files;
+- the PR targets the default branch and the classified commit is the PR head;
+- factory PRs: the latest ledger record for the PR names that exact commit, its gates line is GREEN
+  with exit 0, its failing-test proof is PROVEN or NOT_REQUIRED, the verifier said `verified`, the
+  monitor raised no high flag, and the record comes from a `factory-implement` run on the default
+  branch;
+- Dependabot PRs: only exact patch bumps of existing dependencies (no range changes, no other
+  dependency fields), lockfile entries changed only for those packages, from exactly the old to
+  exactly the new version, at their canonical registry URLs; every commit authored by Dependabot,
+  committed by GitHub or Dependabot, and signature-verified; and, for that commit, a successful
+  `factory-gates` verdict job and a successful `dependency-review` job (vulnerabilities, licences);
+- no freeze is in force and no blocking label (`factory:needs-human`, `factory:human-only`,
+  `factory:no-auto-merge`, `factory:rejected`) is present, checked again just before the merge.
+
+The merge is made through the REST API with the classified commit as the required head SHA, by a
+dedicated merge App, the only ruleset bypass actor besides admins. Its key is an environment
+secret in `factory-merge`, which only the default branch can use. The workflows run only from the
+default branch.
+
+**Trust assumption.** Users with write access are trusted. They can write the ledger branch, labels
+and issues that this evidence reads. These checks stop the agent and outside contributors from
+reaching auto-merge; they do not stop a maintainer.

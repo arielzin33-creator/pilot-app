@@ -119,7 +119,9 @@ def matches_any(path: str, patterns: list[str]) -> bool:
 
 
 def git(root: Path, *args: str, check: bool = True) -> str:
-    res = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    # surrogateescape: a file name that is not valid UTF-8 must not crash the policy engine
+    res = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
+                         encoding="utf-8", errors="surrogateescape")
     if check and res.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
     return res.stdout

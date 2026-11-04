@@ -109,13 +109,44 @@ must cite their run of evidence (charter §9).
 - **Decision:** stay on GitHub Actions. Revisit when a second operator joins, a second
   repository onboards, or runs need to resume across hours.
 
-## 2026-11-04 — Auto-merge excluded
+## 2026-11-04 — Auto-merge excluded (superseded the same day; see below)
 
-- **Decision (owner):** no Tier 0 class is qualified for automatic merge. Phase F's
-  qualification process (spec §9.6) is not built. Every PR is merged by a human.
-- **Reason:** there is no second reviewer, and a single owner's review is the only independent check.
+- **Decision (owner, superseded):** no Tier 0 class is qualified for automatic merge, and
+  Phase F's qualification process (spec §9.6) is not built.
 
 ## 2026-11-04 — Pooled sandboxes not needed
 
 - **Decision:** GitHub-hosted runners with `sandbox-exec.sh` are the sandbox. E2B or Modal
   pools (Phase F deliverable 3) wait until runner limits bind (concurrency 1 today).
+
+## 2026-11-04 — Qualified auto-merge built, switched off (reverses the exclusion above)
+
+- **Decision (owner):** build Phase F deliverable 4, Tier 0 auto-merge after qualification
+  (spec §9.6).
+- **Built:**
+  - `automerge.py` (class membership, decision, qualification report, revocation);
+  - `automerge-collect.sh` (trusted evidence);
+  - `factory-automerge.yml` (default branch only; evaluate with a read-only token; merge with a
+    dedicated App whose key lives in the `factory-merge` environment, through the REST API bound
+    to the classified commit; daily escape-audit checklist);
+  - `factory-qualify.yml` (report for the owner).
+- **Shipped state:** `auto_merge.enabled: false`. Both classes (`docs`, `dependency-patch`) are
+  `candidate`. Nothing merges until a class passes qualification on this repository's evidence and
+  the owner records the decision (charter section 11).
+- **Constraint kept:** with no second reviewer, Tier 3 still never runs unattended, and Tier 1–3
+  never auto-merge.
+- **Review (same day):** an independent adversarial review found 13 defects in the first build
+  (among them: ignored paths invisible to the class check, factory branches accepted from any
+  author, gates read from a forgeable commit status, `escalate` treated as acceptable, no binding
+  of the ledger record to the merged commit, unbounded lockfile changes, range versions read as
+  patch bumps). All 13 were fixed and each has a regression test in `tests/test_automerge.py`.
+  A second independent review confirmed the 13 fixes and found one bypass (the docs class would
+  merge agent-instruction files such as `CLAUDE.local.md` or `docs/CLAUDE.md`) and seven smaller
+  gaps (Dependabot merges ignored dependency review; lockfile versions not tied to the bump;
+  signature checked on the author only; unknown runtime accepted; string `window_prs`; labels not
+  rechecked at merge time; any repository-wide escape or "revert" title revoked every class).
+  All eight were fixed with regression tests.
+- **Trust assumption:** users with write access are trusted; the evidence (ledger branch, labels,
+  issues) is writable by them.
+- **Not yet verified:** the workflows and the evidence collector have run only against a local
+  git remote with a stubbed `gh`, not against GitHub.

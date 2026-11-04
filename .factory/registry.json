@@ -1,17 +1,109 @@
 {
-  "_comment": "Core asset registry (spec §10.5 deliverable 5, HIST-36). Every reusable asset the factory offers, with an owner and a version. Ledger records list the asset ids they used so usage can be counted (intake.py registry --ledger-dir).",
+  "_comment": "Core asset registry (spec \u00a710.5 deliverable 5, HIST-36). Every reusable asset the factory offers, with an owner and a version. Ledger records list the asset ids they used so usage can be counted (intake.py registry --ledger-dir).",
   "assets": [
-    {"id": "tmpl-prfaq", "kind": "template", "path": ".factory/templates/intake/PRFAQ.md", "description": "Working-backwards brief with kill gate", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "tmpl-constitution", "kind": "template", "path": ".factory/templates/intake/CONSTITUTION.md", "description": "Product constitution (non-negotiable principles)", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "tmpl-spec", "kind": "template", "path": ".factory/templates/spec/spec.md", "description": "Feature spec: stories, Given/When/Then, requirements", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "tmpl-plan", "kind": "template", "path": ".factory/templates/spec/plan.md", "description": "Technical plan with constitution check", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "tmpl-tasks", "kind": "template", "path": ".factory/templates/spec/tasks.md", "description": "Machine-readable task list (one task = one PR)", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "skill-prfaq", "kind": "skill", "path": ".claude/skills/prfaq/SKILL.md", "description": "Draft and review a PR/FAQ", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "skill-interview-to-spec", "kind": "skill", "path": ".claude/skills/interview-to-spec/SKILL.md", "description": "Interview to spec, plan and tasks", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "skill-factory-triage", "kind": "skill", "path": ".claude/skills/factory-triage/SKILL.md", "description": "Triage an issue into a hand-off", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "agent-verifier", "kind": "agent", "path": ".claude/agents/factory-verifier.md", "description": "Read-only verifier subagent", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "script-gates", "kind": "script", "path": ".factory/scripts/gates.sh", "description": "Deterministic gate verdict", "owner": "@arielzin33-creator", "version": "2.0"},
-    {"id": "script-intake", "kind": "script", "path": ".factory/scripts/intake.py", "description": "Spec checks, backlog generator, design tokens", "owner": "@arielzin33-creator", "version": "1.0"},
-    {"id": "wf-implement", "kind": "workflow", "path": ".github/workflows/factory-implement.yml", "description": "Issue to verified draft PR", "owner": "@arielzin33-creator", "version": "2.0"}
+    {
+      "id": "tmpl-prfaq",
+      "kind": "template",
+      "path": ".factory/templates/intake/PRFAQ.md",
+      "description": "Working-backwards brief with kill gate",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "tmpl-constitution",
+      "kind": "template",
+      "path": ".factory/templates/intake/CONSTITUTION.md",
+      "description": "Product constitution (non-negotiable principles)",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "tmpl-spec",
+      "kind": "template",
+      "path": ".factory/templates/spec/spec.md",
+      "description": "Feature spec: stories, Given/When/Then, requirements",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "tmpl-plan",
+      "kind": "template",
+      "path": ".factory/templates/spec/plan.md",
+      "description": "Technical plan with constitution check",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "tmpl-tasks",
+      "kind": "template",
+      "path": ".factory/templates/spec/tasks.md",
+      "description": "Machine-readable task list (one task = one PR)",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "skill-prfaq",
+      "kind": "skill",
+      "path": ".claude/skills/prfaq/SKILL.md",
+      "description": "Draft and review a PR/FAQ",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "skill-interview-to-spec",
+      "kind": "skill",
+      "path": ".claude/skills/interview-to-spec/SKILL.md",
+      "description": "Interview to spec, plan and tasks",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "skill-factory-triage",
+      "kind": "skill",
+      "path": ".claude/skills/factory-triage/SKILL.md",
+      "description": "Triage an issue into a hand-off",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "agent-verifier",
+      "kind": "agent",
+      "path": ".claude/agents/factory-verifier.md",
+      "description": "Read-only verifier subagent",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "script-gates",
+      "kind": "script",
+      "path": ".factory/scripts/gates.sh",
+      "description": "Deterministic gate verdict",
+      "owner": "@arielzin33-creator",
+      "version": "2.0"
+    },
+    {
+      "id": "script-intake",
+      "kind": "script",
+      "path": ".factory/scripts/intake.py",
+      "description": "Spec checks, backlog generator, design tokens",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    },
+    {
+      "id": "wf-implement",
+      "kind": "workflow",
+      "path": ".github/workflows/factory-implement.yml",
+      "description": "Issue to verified draft PR",
+      "owner": "@arielzin33-creator",
+      "version": "2.0"
+    },
+    {
+      "id": "wf-automerge",
+      "kind": "workflow",
+      "path": ".github/workflows/factory-automerge.yml",
+      "description": "Qualified Tier 0 auto-merge (off by default)",
+      "owner": "@arielzin33-creator",
+      "version": "1.0"
+    }
   ]
 }

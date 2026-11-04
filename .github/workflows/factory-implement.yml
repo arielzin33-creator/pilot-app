@@ -772,6 +772,7 @@ jobs:
               "verdict": j("verdict.json").get("decision"),
               "verify_agent": j("record-verify.json").get("agent"),
               "pr_number": t("pr-number.txt"),
+              "head_sha": t("head-sha.txt"),
               "implementer_status": j("implement.json").get("status"),
               "monitor": j("monitor.json"),
           })

@@ -39,16 +39,31 @@ factory:brief|FEF2C0|PR/FAQ brief under review (Phase E gate 1)
 factory:incident|D93F0B|Production signal turned into an issue (Phase D)
 factory:retro|C5DEF5|Weekly factory retrospective
 factory:preview|BFDADC|A human allows a preview deployment of a factory PR
+factory:auto-merged|0E8A16|Merged by the factory under a qualified Tier 0 class
+factory:audit-opened|C2E0C6|Auto-merged PR listed in an escape-audit checklist issue
+factory:sampled-review|FBCA04|Post-merge review of a sampled auto-merged PR
+factory:escape|B60205|A defect escaped review; body says Escaped from #N (revokes auto-merge)
+factory:no-auto-merge|E99695|Never auto-merge this PR
+factory:class-docs|EDEDED|Auto-merge class: docs
+factory:class-dependency-patch|EDEDED|Auto-merge class: dependency-patch
 LABELS
 
 echo "== Ruleset on $DEFAULT_BRANCH"
+# Qualified auto-merge (spec §9.6): the dedicated merge App, if configured, may bypass the review
+# rules through pull requests only. It is used solely by factory-automerge's merge job.
+MERGE_APP_ID="$(gh variable get FACTORY_MERGE_APP_ID -R "$REPO" 2>/dev/null || true)"
+EXTRA_BYPASS=""
+if [[ "$MERGE_APP_ID" =~ ^[0-9]+$ ]]; then
+  EXTRA_BYPASS=", { \"actor_id\": $MERGE_APP_ID, \"actor_type\": \"Integration\", \"bypass_mode\": \"pull_request\" }"
+  echo "   merge App $MERGE_APP_ID added as a pull-request bypass actor"
+fi
 cat > /tmp/factory-ruleset.json <<JSON
 {
   "name": "factory-default-branch",
   "target": "branch",
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
-  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" } ],
+  "bypass_actors": [ { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }$EXTRA_BYPASS ],
   "rules": [
     { "type": "deletion" },
     { "type": "non_fast_forward" },
@@ -74,12 +89,13 @@ fi
 echo "== Deployment environments (Phase D)"
 OWNER_LOGIN="${OWNER_LOGIN:-$(gh api user --jq .login)}"
 OWNER_ID="$(gh api "users/$OWNER_LOGIN" --jq .id)"
-for envname in preview staging production; do
+for envname in preview staging production factory-merge; do
   if [ "$envname" = production ]; then
     # A human (the owner) approves every production deployment. prevent_self_review stays false
     # because a solo owner both merges and approves; with a second operator, set it to true.
     body="{\"wait_timer\":0,\"prevent_self_review\":false,\"reviewers\":[{\"type\":\"User\",\"id\":$OWNER_ID}],\"deployment_branch_policy\":{\"protected_branches\":false,\"custom_branch_policies\":true}}"
-  elif [ "$envname" = staging ]; then
+  elif [ "$envname" = staging ] || [ "$envname" = factory-merge ]; then
+    # factory-merge holds FACTORY_MERGE_APP_KEY; only the default branch's workflow can use it.
     body='{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
   else
     body='{}'
@@ -92,6 +108,7 @@ for envname in preview staging production; do
   fi
 done
 echo "   Add environment secrets yourself (DEPLOY_TOKEN or DEPLOY_SSH_KEY) for the provider you choose."
+echo "   If you use auto-merge, put FACTORY_MERGE_APP_KEY in the factory-merge environment, not the repository."
 
 echo "== Repository variables (identifiers, not secrets) - set these yourself:"
 for v in ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do

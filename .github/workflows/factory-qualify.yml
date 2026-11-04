@@ -1,0 +1,70 @@
+# factory-qualify: the qualification report for one auto-merge class (spec §9.6). It never changes
+# policy: it opens an issue with the evidence, and a human records the decision in policy.json and
+# DECISIONS.md in a reviewed pull request. Runs only from the default branch.
+
+name: factory-qualify
+
+on:
+  workflow_dispatch:
+    inputs:
+      class:
+        description: "Auto-merge class (policy.json auto_merge.classes)"
+        required: true
+      eval_results:
+        description: "Path of an evals.py results file in the repository (factory-produced classes)"
+        required: false
+        default: ""
+
+permissions: {}
+
+jobs:
+  report:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CLASS: ${{ inputs.class }}
+      EVAL: ${{ inputs.eval_results }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Trusted engine
+        run: |
+          cp -R .factory "$RUNNER_TEMP/trusted"
+          echo "FACTORY_POLICY=$RUNNER_TEMP/trusted/policy.json" >> "$GITHUB_ENV"
+          echo "FACTORY_SCRIPTS=$RUNNER_TEMP/trusted/scripts" >> "$GITHUB_ENV"
+      - name: Collect history and evaluate
+        run: |
+          [[ "$CLASS" =~ ^[a-z0-9-]+$ ]] || { echo "::error::invalid class name"; exit 1; }
+          if [ -n "$EVAL" ] && ! [[ "$EVAL" =~ ^evals/results/[A-Za-z0-9_.-]+\.json$ && "$EVAL" != *..* ]]; then
+            echo "::error::eval_results must be evals/results/<file>.json"; exit 1
+          fi
+          bash "$FACTORY_SCRIPTS/automerge-collect.sh" history "$CLASS" "$RUNNER_TEMP/q"
+          set +e
+          python3 -I "$FACTORY_SCRIPTS/automerge.py" qualify --class "$CLASS" --history-json "$RUNNER_TEMP/q/history.json" \
+            --ledger-dir "$RUNNER_TEMP/q/ledger" ${EVAL:+--eval-json "$EVAL"} > "$RUNNER_TEMP/report.json"
+          set -e
+          cat "$RUNNER_TEMP/report.json"
+      - name: Open the report for the owner's decision
+        run: |
+          python3 -I - "$RUNNER_TEMP/report.json" > "$RUNNER_TEMP/body.md" <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print(f"## Auto-merge qualification: `{r['class']}`\n")
+          print(f"**Result:** {'QUALIFIES (a human decides)' if r['qualified'] else 'does not qualify yet'}\n")
+          for k, v in (r.get("facts") or {}).items():
+              print(f"- {k}: {v}")
+          if r["reasons"]:
+              print("\n**Blocking reasons:**")
+              for x in r["reasons"]:
+                  print(f"- {x}")
+          print(f"\n**Next step:** {r.get('next_step', 'Fix the class definition in policy.json.')}")
+          PY
+          gh issue create -R "$GITHUB_REPOSITORY" --label factory:retro --title "Auto-merge qualification report: $CLASS" --body-file "$RUNNER_TEMP/body.md"

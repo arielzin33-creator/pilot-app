@@ -158,7 +158,7 @@
     "tier3": "deep"
   },
   "models": {
-    "_comment": "The verifier uses a different model from the implementer (writer never grades its own work; spec \u00a75).",
+    "_comment": "The verifier uses a different model from the implementer (writer never grades its own work; spec §5).",
     "triage": "claude-sonnet-5-5",
     "implementer": "claude-sonnet-5-5",
     "verifier": "claude-opus-5-5"
@@ -180,7 +180,7 @@
   "_tier2": "Phase B: Tier 2 (UI, public API, larger changes) may run unattended only when its hand-off cites a spec folder whose spec, plan and tasks are all approved (SPEC_NOT_APPROVED otherwise). Tier 3 never runs unattended.",
   "llm_tier_raise_only": true,
   "dependency_policy": {
-    "_comment": "Lockfile gate (spec \u00a76.5). Every package resolves from an allowed registry with an sha512 integrity hash; no git, file or URL specifiers; packages with install scripts must be listed (install scripts never run in agent jobs: npm ci --ignore-scripts).",
+    "_comment": "Lockfile gate (spec §6.5). Every package resolves from an allowed registry with an sha512 integrity hash; no git, file or URL specifiers; packages with install scripts must be listed (install scripts never run in agent jobs: npm ci --ignore-scripts).",
     "registries": [
       "https://registry.npmjs.org/"
     ],
@@ -240,6 +240,86 @@
       "steps": [
         "publish-token"
       ]
+    },
+    "FACTORY_MERGE_APP_KEY": {
+      "purpose": "Dedicated merge GitHub App for qualified Tier 0 auto-merge (spec §9.6); ruleset bypass actor; environment secret in factory-merge (default branch only); used only by the merge job, which runs no repository code",
+      "jobs": {
+        "factory-automerge.yml": [
+          "merge"
+        ]
+      },
+      "steps": [
+        "merge-token"
+      ],
+      "environment": true
+    }
+  },
+  "auto_merge": {
+    "_comment": "Qualified auto-merge for narrow Tier 0 classes (spec §9.6; owner decision 2026-11-04). Off until a class qualifies on this repository's evidence and a human records the decision. Revocation is automatic: an escape, a revert, a model or harness change, or a red-team failure returns the class to human review. Tier 1-3 never auto-merge in 0.x.",
+    "enabled": false,
+    "factory_authors": [
+      "github-actions[bot]"
+    ],
+    "_factory_authors_note": "Logins that publish factory PRs. With the optional publish App (Phase F), replace with that App's bot login, e.g. my-factory-publisher[bot].",
+    "qualification": {
+      "window_prs": 50,
+      "audit_days": 14,
+      "sample_every": 5,
+      "human_acceptance_floor": "pass^k must be at or above the class's human acceptance rate"
+    },
+    "classes": {
+      "docs": {
+        "kind": "docs",
+        "producer": "factory",
+        "description": "Documentation-only changes produced by the factory (Tier 0, fast gates).",
+        "paths": [
+          "*.md",
+          "docs/**/*.md"
+        ],
+        "excluded": [
+          "docs/factory/**",
+          "docs/product/**",
+          "specs/**",
+          "AGENTS.md",
+          "CLAUDE.md",
+          "CHANGELOG.md",
+          "SECURITY.md",
+          "LICENSE*",
+          "CONTRIBUTING*",
+          "CODE_OF_CONDUCT*",
+          "**/CLAUDE*.md",
+          "**/AGENTS*.md",
+          "**/GEMINI*.md",
+          ".github/**"
+        ],
+        "max_changed_lines": 200,
+        "max_mean_cost_usd": 2.0,
+        "min_publish_success": 0.9,
+        "max_open_sampled_reviews": 3,
+        "status": "candidate",
+        "qualified_on": "",
+        "decision_ref": "",
+        "runtime": {}
+      },
+      "dependency-patch": {
+        "kind": "dependency-bump",
+        "producer": "dependabot",
+        "description": "Dependabot patch-level bumps of existing dependencies (package.json versions and package-lock.json only).",
+        "paths": [
+          "package.json",
+          "package-lock.json"
+        ],
+        "excluded": [],
+        "bump_kinds": [
+          "patch"
+        ],
+        "max_changed_lines": 400,
+        "max_open_sampled_reviews": 3,
+        "status": "candidate",
+        "qualified_on": "",
+        "decision_ref": "",
+        "runtime": {}
+      }
     }
   }
 }
