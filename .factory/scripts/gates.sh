@@ -11,6 +11,7 @@
 # Usage:
 #   ./.factory/scripts/gates.sh fast    # types + lint            (~seconds, run constantly)
 #   ./.factory/scripts/gates.sh full    # + tests + build         (default, run before any PR)
+#   ./.factory/scripts/gates.sh ui      # + end-to-end click-through (Tier 2 UI changes)
 #   ./.factory/scripts/gates.sh deep    # + audit + architecture  (load-bearing changes)
 #
 # Exit codes:  0 = all required gates green   1 = at least one gate red
@@ -32,9 +33,9 @@ cd "$ROOT" || exit 2
 GATES_CONF="${FACTORY_GATES_CONF:-$ROOT/.factory/gates.conf}"
 
 case "$LEVEL" in
-  fast|full|deep) ;;
+  fast|full|ui|deep) ;;
   *)
-    echo "error: gate level must be fast, full, or deep (got: $LEVEL)" >&2
+    echo "error: gate level must be fast, full, ui, or deep (got: $LEVEL)" >&2
     printf 'FACTORY_GATES: level=%s status=MISCONFIGURED passed=0 failed=0 failing=none skipped=none misconfigured=invalid-level\n' "$LEVEL"
     exit 2
     ;;
@@ -42,7 +43,9 @@ esac
 
 REQUIRED_FAST="types lint"
 REQUIRED_FULL="types lint test"
+REQUIRED_UI="types lint test e2e"
 REQUIRED_DEEP="types lint test audit architecture"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$GATES_CONF" ]; then
   # This file is protected by the factory contract and contains assignments only.
   # shellcheck disable=SC1090
@@ -56,12 +59,13 @@ fi
 case "$LEVEL" in
   fast) REQUIRED="$REQUIRED_FAST" ;;
   full) REQUIRED="$REQUIRED_FULL" ;;
+  ui)   REQUIRED="$REQUIRED_UI" ;;
   deep) REQUIRED="$REQUIRED_DEEP" ;;
 esac
 
 for gate in $REQUIRED; do
   case "$gate" in
-    types|lint|test|build|audit|mutation|architecture) ;;
+    types|lint|test|build|deps|e2e|holdout|migrations|audit|mutation|architecture) ;;
     *)
       echo "error: unknown required gate in .factory/gates.conf: $gate" >&2
       printf 'FACTORY_GATES: level=%s status=MISCONFIGURED passed=0 failed=0 failing=none skipped=none misconfigured=unknown-required-gate:%s\n' "$LEVEL" "$gate"
@@ -81,8 +85,10 @@ c_green() { printf '\033[32m%s\033[0m\n' "$1"; }
 c_dim()   { printf '\033[2m%s\033[0m\n' "$1"; }
 
 # run <name> <command...>  - runs a gate, records the verdict, never exits early.
+RAN=" "
 run() {
   local name="$1"; shift
+  RAN="$RAN$name "
   printf '\n=== gate: %s ===\n' "$name"
   if "$@"; then
     c_green "PASS  $name"
@@ -95,6 +101,7 @@ run() {
 }
 
 skip() {
+  RAN="$RAN$1 "
   c_dim "SKIP  $1 ($2)"
   SKIPPED="${SKIPPED}${SKIPPED:+,}$1"
   case " $REQUIRED " in
@@ -162,11 +169,20 @@ esac
 # ---------------------------------------------------------------------------
 # TIER 2 - full. Tests and build. The default gate before any PR.
 # ---------------------------------------------------------------------------
-if [ "$LEVEL" = "full" ] || [ "$LEVEL" = "deep" ]; then
+if [ "$LEVEL" = "full" ] || [ "$LEVEL" = "ui" ] || [ "$LEVEL" = "deep" ]; then
   case "$STACK" in
     node)
       if pkg_has test; then run test $PMRUN test; else skip test "no test script"; fi
       if pkg_has build; then run build $PMRUN build; else skip build "no build script"; fi
+      # Supply chain (spec §6.5): lockfile resolves only from allowed registries with
+      # integrity hashes, no git/file/URL specifiers, install scripts only from an allow-list.
+      # Database migrations (Phase D): expand/contract rules, append-only history.
+      if [ -d migrations ] && [ -f "$SCRIPT_DIR/release.py" ]; then
+        run migrations python3 -I "$SCRIPT_DIR/release.py" migration-lint --dir migrations
+      fi
+      if [ -f package-lock.json ] && [ -f "$SCRIPT_DIR/factory.py" ]; then
+        run deps python3 -I "$SCRIPT_DIR/factory.py" lockfile-check --root "$ROOT"
+      else skip deps "no package-lock.json"; fi
       ;;
     python)
       if has pytest; then run test pytest -q; else skip test "pytest not installed"; fi
@@ -181,6 +197,22 @@ if [ "$LEVEL" = "full" ] || [ "$LEVEL" = "deep" ]; then
       ;;
     *) skip test "unknown stack"; skip build "unknown stack" ;;
   esac
+fi
+
+# ---------------------------------------------------------------------------
+# UI - click-through (rung 5, Phase B): the product is run and driven in a browser, with
+# traces and screenshots kept as evidence (test-results/, playwright-report/).
+# ---------------------------------------------------------------------------
+if [ "$LEVEL" = "ui" ] || [ "$LEVEL" = "deep" ]; then
+  if [ "$STACK" = "node" ] && pkg_has test:e2e; then run e2e $PMRUN test:e2e
+  else skip e2e "no test:e2e script"; fi
+fi
+
+# Holdout scenarios (Phase B): acceptance checks kept outside the repository, so the agent
+# never sees them (PRAC-01, VER-13). Run when the workflow provides FACTORY_HOLDOUT_DIR.
+if [ -n "${FACTORY_HOLDOUT_DIR:-}" ] && [ "$LEVEL" != "fast" ]; then
+  if [ -x "$FACTORY_HOLDOUT_DIR/run.sh" ]; then run holdout "$FACTORY_HOLDOUT_DIR/run.sh" "$ROOT"
+  else skip holdout "FACTORY_HOLDOUT_DIR has no executable run.sh"; fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -216,6 +248,7 @@ if [ "$LEVEL" = "deep" ]; then
   # Architecture rules: plain grep assertions are enough to start and are
   # impossible for an agent to argue with. Add your own below.
   printf '\n=== gate: architecture ===\n'
+  RAN="${RAN}architecture "
   ARCH_FAIL=0
   # Example rule: nothing outside src/db may import the raw database client.
   # if grep -rn "from '.*db/client'" src --include='*.ts' | grep -v '^src/db/'; then
@@ -231,6 +264,12 @@ fi
 # ---------------------------------------------------------------------------
 # VERDICT
 # ---------------------------------------------------------------------------
+# A required gate that neither ran nor was skipped (for example `holdout` without a holdout
+# directory, or `deps` on a non-node stack) is a misconfiguration, never a silent pass.
+for gate in $REQUIRED; do
+  case "$RAN" in *" $gate "*) ;; *) MISCONFIGURED="${MISCONFIGURED}${MISCONFIGURED:+,}$gate" ;; esac
+done
+
 STATUS="GREEN"
 EXIT_STATUS=0
 if [ -n "$MISCONFIGURED" ]; then

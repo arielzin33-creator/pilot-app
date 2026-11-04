@@ -44,18 +44,21 @@ jobs:
           ONE: ${{ github.event.issue.number || inputs.issue }}
         run: |
           if [ -n "$ONE" ]; then
-            gh api "repos/$REPO/issues/$ONE" --jq '[{number: .number, assoc: .author_association, labels: [.labels[].name]}]' > issues.json
+            gh api "repos/$REPO/issues/$ONE" --jq '[{number: .number, assoc: .author_association, login: .user.login, labels: [.labels[].name]}]' > issues.json
           else
             gh api "repos/$REPO/issues?state=open&labels=factory:inbox&per_page=20" \
-              --jq '[.[] | select(.pull_request == null) | {number: .number, assoc: .author_association, labels: [.labels[].name]}]' > issues.json
+              --jq '[.[] | select(.pull_request == null) | {number: .number, assoc: .author_association, login: .user.login, labels: [.labels[].name]}]' > issues.json
           fi
           python3 -I - <<'EOF'
           import json, os
           issues = json.load(open("issues.json"))
-          trusted = [i["number"] for i in issues
-                     if i["assoc"] in ("OWNER", "MEMBER", "COLLABORATOR") and "factory:inbox" in i["labels"]][:5]
-          external = [i["number"] for i in issues
-                      if i["assoc"] not in ("OWNER", "MEMBER", "COLLABORATOR") and "factory:inbox" in i["labels"]]
+          # Issues opened by the factory's own incident intake (github-actions[bot], sanitised
+          # alert text, label factory:incident) are triaged like a member's issue.
+          def ok(i):
+              return i["assoc"] in ("OWNER", "MEMBER", "COLLABORATOR") or (
+                  i.get("login") == "github-actions[bot]" and "factory:incident" in i["labels"])
+          trusted = [i["number"] for i in issues if ok(i) and "factory:inbox" in i["labels"]][:5]
+          external = [i["number"] for i in issues if not ok(i) and "factory:inbox" in i["labels"]]
           json.dump(external, open("external.json", "w"))
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write("matrix=" + json.dumps({"issue": trusted}) + "\n")
@@ -191,6 +194,10 @@ jobs:
               ["python3", "-I", ".factory/scripts/factory.py", "predict-tier", "--files", ",".join(files)],
               capture_output=True, text=True).stdout or "{}")
           tier = int(pred.get("tier", 3))
+          # LLM opinion is raise-only (Phase B, PRAC-14): it can make a tier higher, never lower.
+          llm_tier = t.get("suggested_tier")
+          if isinstance(llm_tier, int) and 0 <= llm_tier <= 3 and llm_tier > tier:
+              tier = llm_tier
           disp = t.get("disposition") or "needs-info"
           # The deterministic classifier can only make the disposition more conservative.
           if not t:
@@ -212,7 +219,7 @@ jobs:
               f"files_expected: {','.join(files)[:400]}",
               f"predicted_tier: {tier}",
               f"load_bearing: {'true' if 'LOAD_BEARING_TOUCHED' in (pred.get('violations') or []) else 'false'}",
-              f"gate_level: {t.get('gate_level') if t.get('gate_level') in ('fast','full') else 'full'}",
+              f"gate_level: {'ui' if tier == 2 else (t.get('gate_level') if t.get('gate_level') in ('fast','full') else 'full')}",
               f"confidence: {t.get('confidence') if t.get('confidence') in ('high','medium','low') else 'low'}",
               f"triaged_at: {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
               "```",

@@ -63,20 +63,34 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      - name: Dependencies (no install scripts) and sandbox
+      - name: Dependencies (no install scripts), sandbox and browsers (base-pinned Playwright)
+        env:
+          LEVEL: ${{ steps.cls.outputs.level }}
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ms-playwright" >> "$GITHUB_ENV"
+          if [ "$LEVEL" = "ui" ] || [ "$LEVEL" = "deep" ]; then
+            # The Playwright version comes from the BASE commit's lockfile, never the PR's.
+            v="$(git show "$BASE_SHA:package-lock.json" 2>/dev/null | python3 -I -c 'import json,sys
+          try: l=json.load(sys.stdin); print(((l.get("packages") or {}).get("node_modules/@playwright/test") or {}).get("version",""))
+          except Exception: print("")')"
+            if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              mkdir -p "$RUNNER_TEMP/pw" && (cd "$RUNNER_TEMP/pw" && PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ms-playwright" \
+                npm exec --yes --package="playwright@$v" -- playwright install --with-deps chromium)
+            fi
+          fi
           npm ci --ignore-scripts
           # Dependency audit outside the sandbox (needs the registry; runs no project code).
           if npm audit --audit-level=high >/dev/null 2>&1; then echo "FACTORY_AUDIT_STATUS=pass" >> "$GITHUB_ENV"
           else echo "FACTORY_AUDIT_STATUS=fail" >> "$GITHUB_ENV"; fi
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Gates (sandboxed; verdict from the trusted script's exit code)
         env:
           LEVEL: ${{ steps.cls.outputs.level }}
           TRUST_OK: ${{ steps.cls.outputs.trust_ok }}
           FACTORY_GATES_CONF: ${{ runner.temp }}/trusted/.factory/gates.conf
-          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF FACTORY_AUDIT_STATUS
+          FACTORY_POLICY: ${{ runner.temp }}/trusted/.factory/policy.json
+          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF FACTORY_AUDIT_STATUS FACTORY_POLICY PLAYWRIGHT_BROWSERS_PATH
           SANDBOX_RO_GIT: "1"
         run: |
           set +e

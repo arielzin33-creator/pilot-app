@@ -76,6 +76,7 @@ lines = [
     f"| Failing-test proof | `{t('proof.txt')}` |",
     f"| Diff policy | tier {cls.get('tier')}, {cls.get('file_count')} files, {cls.get('changed_lines')} lines, stop reasons: {', '.join(cls.get('stop_reasons') or []) or 'none'} |",
     f"| Verifier (advisory, different model) | {verdict.get('decision', 'not run')} |",
+    f"| Trajectory monitor (advisory) | {', '.join(sorted({f['detector'] for f in (j('monitor.json').get('findings') or [])})) or 'no flags'} |",
     f"| Estimated model cost | ${cost:.2f} (client-side estimate, not an invoice) |",
     "",
     "## What changed (implementer's account)",

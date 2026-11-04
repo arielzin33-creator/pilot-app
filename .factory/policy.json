@@ -67,7 +67,8 @@
     "esbuild.config.*",
     ".swcrc",
     "turbo.json",
-    "nx.json"
+    "nx.json",
+    "evals/**"
   ],
   "_load_bearing_package_json_fields": "Changes to these package.json fields are load-bearing because the gates run them or read them: scripts, engines, packageManager, overrides, workspaces, and embedded test, coverage, lint and transpiler configuration.",
   "load_bearing_package_json_fields": [
@@ -145,13 +146,15 @@
     "run_timeout_minutes": 45,
     "stale_in_progress_hours": 3,
     "prompt_max_untrusted_chars": 8000,
-    "ledger_reconcile_tolerance_pct": 10
+    "ledger_reconcile_tolerance_pct": 10,
+    "tier2_max_changed_lines": 1200,
+    "tier2_max_files": 15
   },
   "gates": {
     "docs_only": "fast",
     "tier0": "full",
     "tier1": "full",
-    "tier2": "full",
+    "tier2": "ui",
     "tier3": "deep"
   },
   "models": {
@@ -172,5 +175,71 @@
     "OWNER",
     "MEMBER",
     "COLLABORATOR"
-  ]
+  ],
+  "tier2_unattended_with_approved_spec": true,
+  "_tier2": "Phase B: Tier 2 (UI, public API, larger changes) may run unattended only when its hand-off cites a spec folder whose spec, plan and tasks are all approved (SPEC_NOT_APPROVED otherwise). Tier 3 never runs unattended.",
+  "llm_tier_raise_only": true,
+  "dependency_policy": {
+    "_comment": "Lockfile gate (spec \u00a76.5). Every package resolves from an allowed registry with an sha512 integrity hash; no git, file or URL specifiers; packages with install scripts must be listed (install scripts never run in agent jobs: npm ci --ignore-scripts).",
+    "registries": [
+      "https://registry.npmjs.org/"
+    ],
+    "install_scripts_allowed": [
+      "esbuild",
+      "@esbuild/*",
+      "fsevents"
+    ],
+    "min_integrity": "sha512"
+  },
+  "allowed_workflow_secrets": {
+    "_comment": "The only secrets workflows may reference besides GITHUB_TOKEN. Each is optional, bound to named jobs, and never present in an agent job or the sandbox. Deploy secrets live in GitHub Environments (production with required reviewers).",
+    "FACTORY_HOLDOUT_APP_KEY": {
+      "purpose": "GitHub App private key for optional holdout scenarios; mints a read-only token in the holdouts job, which runs no agent or candidate code",
+      "jobs": {
+        "factory-implement.yml": [
+          "holdouts"
+        ]
+      },
+      "steps": [
+        "holdout-token"
+      ]
+    },
+    "DEPLOY_TOKEN": {
+      "purpose": "Deploy credential for the chosen provider (Fly deploy token or Render deploy hook URL); environment secret",
+      "jobs": {
+        "factory-release.yml": [
+          "staging",
+          "production"
+        ],
+        "factory-preview.yml": [
+          "deploy"
+        ]
+      },
+      "environment": true
+    },
+    "DEPLOY_SSH_KEY": {
+      "purpose": "SSH key for the ssh deploy adapter; environment secret",
+      "jobs": {
+        "factory-release.yml": [
+          "staging",
+          "production"
+        ],
+        "factory-preview.yml": [
+          "deploy"
+        ]
+      },
+      "environment": true
+    },
+    "FACTORY_PUBLISH_APP_KEY": {
+      "purpose": "Optional Phase F publishing identity: GitHub App private key; mints a per-run installation token for branch push, PR and labels",
+      "jobs": {
+        "factory-implement.yml": [
+          "publish"
+        ]
+      },
+      "steps": [
+        "publish-token"
+      ]
+    }
+  }
 }

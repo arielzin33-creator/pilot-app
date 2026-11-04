@@ -11,6 +11,7 @@
 set -uo pipefail
 ROOT="${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 LEVEL="${FACTORY_GATE_LEVEL:-full}"
+[ "$LEVEL" = "ui" ] && LEVEL=full   # browsers are provisioned in the gates job, not the agent job
 MAX="${FACTORY_MAX_STOP_RETRIES:-2}"
 INPUT="$(cat || true)"
 SESSION="$(printf '%s' "$INPUT" | python3 -I -c 'import json,sys

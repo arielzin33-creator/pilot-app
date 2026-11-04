@@ -1,0 +1,57 @@
+# factory-sandbox-image: build the full-stack sandbox image weekly and on lockfile changes,
+# push it to GitHub Container Registry, and attest its provenance (SLSA Build L2; spec §6.5).
+# Runs no agent and no project code (dependencies install with --ignore-scripts).
+
+name: factory-sandbox-image
+
+on:
+  push:
+    branches: [main]
+    paths: [package-lock.json, .factory/sandbox/**]
+  schedule:
+    - cron: "23 2 * * 0"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write               # push to ghcr.io/<owner>/<repo>-factory-sandbox
+      id-token: write               # Sigstore keyless signing of the provenance (no key)
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Image name and Playwright version
+        id: meta
+        run: |
+          repo="$(echo "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/${repo}-factory-sandbox" >> "$GITHUB_OUTPUT"
+          v="$(python3 -I -c 'import json; l=json.load(open("package-lock.json")); print(((l.get("packages") or {}).get("node_modules/@playwright/test") or {}).get("version",""))')"
+          echo "playwright=${v:-1.63.0}" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: .factory/sandbox/Dockerfile
+          build-args: PLAYWRIGHT_VERSION=${{ steps.meta.outputs.playwright }}
+          push: true
+          tags: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true

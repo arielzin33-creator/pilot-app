@@ -1,0 +1,255 @@
+# factory-release: merge to main -> signed image -> staging -> (human approval) -> production,
+# with deploy verification, metric-driven abort and rollback (Phase D; spec §7.2, §10.4).
+#
+# Trust boundaries:
+#   build       builds merged (human-reviewed) code; pushes the image; SBOM; SLSA provenance
+#               signed keyless by the workflow's OIDC identity (no signing key exists).
+#   gate        error-budget freeze check (factory:freeze) and migration lint.
+#   staging     environment "staging": verifies provenance before deploying (admission rule).
+#   production  environment "production": required reviewers approve in the GitHub UI; the
+#               release-readiness pack is attached to a GitHub Release.
+# Deploy credentials are environment secrets, available only to the deploy jobs.
+
+name: factory-release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      p0:
+        description: "P0 fix: allowed through an error-budget freeze"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: factory-release
+  cancel-in-progress: false
+
+env:
+  RELEASE: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: SBOM (CycloneDX) and migration lint
+        run: |
+          mkdir -p "$RUNNER_TEMP/rel"
+          npm ci --ignore-scripts
+          npm sbom --sbom-format cyclonedx --omit dev > "$RUNNER_TEMP/rel/sbom.cdx.json"
+          BEFORE="${{ github.event.before }}"
+          case "$BEFORE" in ""|0000000000000000000000000000000000000000) BEFORE="" ;; esac
+          python3 -I .factory/scripts/release.py migration-lint ${BEFORE:+--base "$BEFORE"} > "$RUNNER_TEMP/rel/migrations.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/rel
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        run: echo "image=ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          build-args: RELEASE=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/rel
+      - name: Error-budget freeze and migration lint
+        env:
+          GH_TOKEN: ${{ github.token }}
+          P0: ${{ inputs.p0 }}
+        run: |
+          n="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:freeze --json number --jq length)"
+          python3 -I .factory/scripts/release.py freeze-check --open-freeze "$n" $([ "$P0" = "true" ] && echo --p0)
+          python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d); sys.exit(0 if d["ok"] else 1)' "$RUNNER_TEMP/rel/migrations.json"
+
+  staging:
+    needs: [build, gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: staging
+      url: ${{ vars.DEPLOY_URL_STAGING }}
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+      DEPLOY_PROVIDER: ${{ vars.DEPLOY_PROVIDER }}
+      DEPLOY_APP_STAGING: ${{ vars.DEPLOY_APP_STAGING }}
+      DEPLOY_URL_STAGING: ${{ vars.DEPLOY_URL_STAGING }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Admission - verify provenance of the exact digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .factory/deploy/admit.sh "$IMAGE" factory-release.yml refs/heads/main
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        if: vars.DEPLOY_PROVIDER == 'fly'
+      - name: Deploy to staging
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_TARGET: ${{ vars.DEPLOY_SSH_TARGET_STAGING }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ vars.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          bash .factory/deploy/deploy.sh staging "$IMAGE"
+      - name: Verify and watch (metric-driven abort)
+        if: env.DEPLOY_URL_STAGING != '' && env.DEPLOY_PROVIDER != 'none' && env.DEPLOY_PROVIDER != ''
+        run: |
+          bash .factory/deploy/verify.sh "$DEPLOY_URL_STAGING" "$RELEASE"
+          python3 -I .factory/scripts/release.py watch --url "$DEPLOY_URL_STAGING/metrics.json" \
+            --minutes "${{ vars.RELEASE_WATCH_MINUTES || 5 }}" --expect-release "$RELEASE"
+
+  production:
+    needs: [build, staging]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: production
+      url: ${{ vars.DEPLOY_URL_PRODUCTION }}
+    permissions:
+      contents: write                # GitHub Release with the readiness pack
+      packages: read
+      attestations: read
+      pull-requests: read
+      issues: read
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}
+      DEPLOY_PROVIDER: ${{ vars.DEPLOY_PROVIDER }}
+      DEPLOY_APP_PRODUCTION: ${{ vars.DEPLOY_APP_PRODUCTION }}
+      DEPLOY_URL_PRODUCTION: ${{ vars.DEPLOY_URL_PRODUCTION }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-inputs-${{ github.run_id }}
+          path: ${{ runner.temp }}/rel
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Admission - verify provenance of the exact digest
+        run: bash .factory/deploy/admit.sh "$IMAGE" factory-release.yml refs/heads/main
+      - name: Release-readiness pack
+        id: pack
+        run: |
+          last="$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json publishedAt --jq '.[0].publishedAt // ""')"
+          gh pr list -R "$GITHUB_REPOSITORY" --state merged --limit 500 \
+            --search "merged:>=${last:-1970-01-01T00:00:00Z} base:main" --json number,title,headRefName > "$RUNNER_TEMP/rel/merged.json"
+          mkdir -p "$RUNNER_TEMP/ledger"
+          if git ls-remote --exit-code --heads origin factory/ledger >/dev/null 2>&1; then
+            git fetch --quiet --depth 1 origin factory/ledger:refs/remotes/origin/factory/ledger
+            git archive refs/remotes/origin/factory/ledger | tar -x -C "$RUNNER_TEMP/ledger"
+          fi
+          VERSION="v$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          python3 -I .factory/scripts/release.py pack --version "$VERSION" --image "$IMAGE" \
+            --sbom "$RUNNER_TEMP/rel/sbom.cdx.json" --provenance "attested (gh attestation verify passed)" \
+            --merged-json "$RUNNER_TEMP/rel/merged.json" --ledger-dir "$RUNNER_TEMP/ledger" \
+            --migrations-json "$RUNNER_TEMP/rel/migrations.json" --out "$RUNNER_TEMP/rel/RELEASE-READINESS.md"
+      - name: Previous production image (for rollback)
+        id: prev
+        run: |
+          prev="$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          img=""
+          [ -n "$prev" ] && img="$(gh release view "$prev" -R "$GITHUB_REPOSITORY" --json body --jq .body | sed -n 's/^Image: `\(.*@sha256:[0-9a-f]*\)`.*/\1/p' | head -1)"
+          echo "image=$img" >> "$GITHUB_OUTPUT"
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # 1.6
+        if: vars.DEPLOY_PROVIDER == 'fly'
+      - name: Deploy to production
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_TARGET: ${{ vars.DEPLOY_SSH_TARGET_PRODUCTION }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ vars.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          bash .factory/deploy/deploy.sh production "$IMAGE"
+      - name: Verify and watch (metric-driven abort)
+        id: watch
+        if: env.DEPLOY_URL_PRODUCTION != '' && env.DEPLOY_PROVIDER != 'none' && env.DEPLOY_PROVIDER != ''
+        run: |
+          bash .factory/deploy/verify.sh "$DEPLOY_URL_PRODUCTION" "$RELEASE"
+          python3 -I .factory/scripts/release.py watch --url "$DEPLOY_URL_PRODUCTION/metrics.json" \
+            --minutes "${{ vars.RELEASE_WATCH_MINUTES || 10 }}" --expect-release "$RELEASE"
+      - name: Roll back to the previous release
+        if: failure() && steps.prev.outputs.image != ''
+        env:
+          DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_TARGET: ${{ vars.DEPLOY_SSH_TARGET_PRODUCTION }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ vars.DEPLOY_SSH_KNOWN_HOSTS }}
+          PREV: ${{ steps.prev.outputs.image }}
+        run: |
+          # The previous image is read from an editable Release body: admit it like any deploy.
+          bash .factory/deploy/admit.sh "$PREV" factory-release.yml refs/heads/main
+          RELEASE="" bash .factory/deploy/deploy.sh production "$PREV"
+          echo "::error::production release aborted and rolled back to $PREV"
+      - name: Publish the GitHub Release with the readiness pack
+        if: success()
+        env:
+          VERSION: ${{ steps.pack.outputs.version }}
+        run: |
+          gh release create "$VERSION" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" \
+            --notes-file "$RUNNER_TEMP/rel/RELEASE-READINESS.md" \
+            "$RUNNER_TEMP/rel/sbom.cdx.json" "$RUNNER_TEMP/rel/RELEASE-READINESS.json"

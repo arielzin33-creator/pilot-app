@@ -1,0 +1,37 @@
+# factory-feed: keep the factory fed and escalations moving (spec §9.5). Daily, no agent.
+# Raises one tracking issue when the ready queue falls below the floor or a needs-human item
+# waits too long; updates it instead of opening duplicates.
+
+name: factory-feed
+
+on:
+  schedule:
+    - cron: "3 6 * * 1-5"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FLOOR: ${{ vars.FACTORY_READY_FLOOR || 5 }}
+      MAX_AGE_DAYS: ${{ vars.FACTORY_ESCALATION_MAX_DAYS || 2 }}
+    steps:
+      - name: Ready-queue floor and escalation age
+        run: |
+          ready="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:ready-to-implement --json number --jq length)"
+          cutoff="$(date -u -d "$MAX_AGE_DAYS days ago" +%FT%TZ)"
+          old="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:needs-human --json number,updatedAt \
+            --jq "[.[] | select(.updatedAt < \"$cutoff\") | .number] | map(\"#\" + tostring) | join(\", \")")"
+          msg=""
+          [ "$ready" -lt "$FLOOR" ] && msg="Ready queue has $ready items (floor $FLOOR). Feed it: triage the inbox, or approve a spec's tasks."
+          [ -n "$old" ] && msg="$msg${msg:+ }Escalations waiting more than $MAX_AGE_DAYS days: $old."
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:retro --search "Factory feed in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$msg" ]; then echo "Feed OK: $ready ready, no stale escalations." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          if [ -n "$existing" ]; then gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "$(date -u +%F): $msg"
+          else gh issue create -R "$GITHUB_REPOSITORY" --title "Factory feed: needs attention" --label factory:retro --body "$msg"; fi

@@ -1,0 +1,43 @@
+# factory-slo: error-budget check (Phase D deliverable 4; LIFE-53, LIFE-54). When the budget is
+# exhausted it opens a factory:freeze issue, which stops the factory (STOP_IF RELEASE_FREEZE) and
+# non-P0 releases. A human closes the freeze issue when the budget recovers.
+# Needs a metrics source: vars.SLO_METRICS_URL returning {"requests": n, "errors": n} over the
+# SLO window (MANUAL-CONNECTIONS.md). Without it the job reports and does nothing.
+
+name: factory-slo
+
+on:
+  schedule:
+    - cron: "29 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  budget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SLO_METRICS_URL: ${{ vars.SLO_METRICS_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the error budget
+        run: |
+          if [ -z "$SLO_METRICS_URL" ]; then echo "SLO_METRICS_URL not set; nothing to check." >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          curl -fsS --max-time 20 "$SLO_METRICS_URL" > "$RUNNER_TEMP/m.json"
+          set +e
+          python3 -I .factory/scripts/release.py slo-check --metrics "$RUNNER_TEMP/m.json" > "$RUNNER_TEMP/slo.json"
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/slo.json" >> "$GITHUB_STEP_SUMMARY"
+          open="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:freeze --json number --jq length)"
+          if [ "$code" -eq 3 ] && [ "$open" = "0" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "Release freeze: error budget exhausted" --label factory:freeze \
+              --body "Opened by factory-slo. The factory and non-P0 releases are stopped (STOP_IF RELEASE_FREEZE). Close this issue when the budget recovers. Details: $(cat "$RUNNER_TEMP/slo.json" | tr -d '\n' | cut -c1-600)"
+          fi

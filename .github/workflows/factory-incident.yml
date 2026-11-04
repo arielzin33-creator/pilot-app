@@ -1,0 +1,89 @@
+# factory-incident: production signals -> tracker issues -> the factory's triage (Phase D
+# deliverable 5; LIFE-58, LIFE-60). Also nudges reviewers about factory PRs waiting too long.
+#
+# Alert sources (Sentry, PostHog, uptime checks) send a repository_dispatch event of type
+# "production-alert" through a small relay or their GitHub integration (MANUAL-CONNECTIONS.md):
+#   {"title": "...", "fingerprint": "...", "release": "...", "count": 12, "url": "https://...", "level": "error"}
+# The payload is untrusted text: it is sanitised and only ever written into an issue body.
+
+name: factory-incident
+
+on:
+  repository_dispatch:
+    types: [production-alert]
+  workflow_dispatch:
+    inputs:
+      title: { description: "Alert title", required: true }
+      fingerprint: { description: "Stable id for deduplication", required: true }
+      release: { description: "Release (git sha)", required: false }
+      url: { description: "Link to the alert", required: false }
+  schedule:
+    - cron: "13 7 * * 1-5"
+
+permissions: {}
+
+jobs:
+  intake:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PAYLOAD: ${{ toJSON(github.event.client_payload || github.event.inputs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or update the incident issue (deduplicated by fingerprint)
+        run: |
+          printf '%s' "$PAYLOAD" > "$RUNNER_TEMP/payload.json"
+          python3 -I - "$RUNNER_TEMP/payload.json" "$RUNNER_TEMP" <<'PY'
+          import json, re, sys, importlib.util, pathlib
+          spec = importlib.util.spec_from_file_location("f", ".factory/scripts/factory.py")
+          f = importlib.util.module_from_spec(spec); spec.loader.exec_module(f)
+          p = json.load(open(sys.argv[1])) or {}
+          clean = lambda v, n: f.sanitize_untrusted(str(v or ""), n).replace("\n", " ")
+          fp = re.sub(r"[^A-Za-z0-9._:-]", "", str(p.get("fingerprint", "")))[:120] or "unknown"
+          url = str(p.get("url") or "")
+          url = url if re.match(r"^https://[A-Za-z0-9.-]+(/[^\s<>\"']*)?$", url) else ""
+          title = clean(p.get("title"), 120) or "Production alert"
+          body = "\n".join([f"<!-- factory-incident: {fp} -->",
+                            "A production signal was turned into an issue by factory-incident (Phase D).", "",
+                            f"- **Title (untrusted, from the alert source):** {title}",
+                            f"- **Release:** `{clean(p.get('release'), 64) or 'unknown'}`",
+                            f"- **Level:** {clean(p.get('level'), 16) or 'error'}  **Count:** {clean(p.get('count'), 12) or '?'}",
+                            f"- **Alert:** {url or '(no link)'}", "",
+                            "Triage decides whether this is factory work. Production data and secrets never go into issues."])
+          out = pathlib.Path(sys.argv[2])
+          (out / "title.txt").write_text(f"Incident: {title}"[:200]); (out / "body.md").write_text(body); (out / "fp.txt").write_text(fp)
+          PY
+          fp="$(cat "$RUNNER_TEMP/fp.txt")"
+          existing="$(gh issue list -R "$GITHUB_REPOSITORY" --state open --label factory:incident --limit 200 --json number,body \
+            --jq "[.[] | select(.body | contains(\"factory-incident: $fp \"))][0].number // empty")"
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" -R "$GITHUB_REPOSITORY" --body "Seen again: $(date -u +%FT%TZ)."
+          else
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$(cat "$RUNNER_TEMP/title.txt")" \
+              --body-file "$RUNNER_TEMP/body.md" --label factory:incident --label factory:inbox
+          fi
+
+  reviewer-nudge:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOURS: ${{ vars.FACTORY_REVIEW_NUDGE_HOURS || 48 }}
+    steps:
+      - name: Remind about factory PRs waiting for review
+        run: |
+          cutoff="$(date -u -d "$HOURS hours ago" +%FT%TZ)"
+          gh pr list -R "$GITHUB_REPOSITORY" --state open --label factory:awaiting-review --json number,createdAt \
+            --jq ".[] | select(.createdAt < \"$cutoff\") | .number" | while read -r n; do
+            gh pr comment "$n" -R "$GITHUB_REPOSITORY" --body "Waiting for human review for more than $HOURS hours. The factory pauses new work when 3 PRs wait (REVIEW_QUEUE_FULL)."
+          done

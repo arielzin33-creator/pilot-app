@@ -5,7 +5,8 @@
 #   implement  agent edits files in a sandbox with no network; Anthropic access by workload
 #              identity federation (no API key); the diff is checked by the trusted engine copy.
 #   claim      labels the item factory:in-progress (issues: write only).
-#   gates      NO secrets and no id-token. Authoritative: checks the patch hash, re-runs the diff
+#   holdouts   optional: fetches hidden acceptance scenarios with a read-only App token; no agent code.
+#   gates      NO secrets and no id-token (holdouts arrive as an artifact). Authoritative: checks the patch hash, re-runs the diff
 #              policy with the base's engine before any agent code runs, then runs gates and the
 #              failing-test proof inside a bubblewrap sandbox (no network, read-only filesystem
 #              except the checkout) so code under test cannot alter the verdict or the evidence.
@@ -54,6 +55,7 @@ jobs:
       issue: ${{ steps.stop.outputs.issue }}
       reasons: ${{ steps.stop.outputs.reasons }}
       item_specific: ${{ steps.stop.outputs.item_specific }}
+      allowed_tier: ${{ steps.stop.outputs.allowed_tier }}
     steps:
       - name: Refuse static Anthropic credentials
         run: |
@@ -86,7 +88,7 @@ jobs:
           item_specific="false"
           for r in ${reasons//,/ }; do
             case "$r" in
-              NEEDS_HUMAN_LABEL|HANDOFF_MISSING|AMBIGUOUS|LOAD_BEARING_EXPECTED|TIER_NOT_UNATTENDED|RED_GATES_TWICE|TOO_MANY_RUNS|TOO_MANY_CI_FIX) item_specific="true" ;;
+              NEEDS_HUMAN_LABEL|HANDOFF_MISSING|AMBIGUOUS|LOAD_BEARING_EXPECTED|TIER_NOT_UNATTENDED|SPEC_NOT_APPROVED|RED_GATES_TWICE|TOO_MANY_RUNS|TOO_MANY_CI_FIX) item_specific="true" ;;
             esac
           done
           [ -n "$issue" ] || item_specific="false"
@@ -94,6 +96,7 @@ jobs:
           echo "issue=$issue" >> "$GITHUB_OUTPUT"
           echo "reasons=$reasons" >> "$GITHUB_OUTPUT"
           echo "item_specific=$item_specific" >> "$GITHUB_OUTPUT"
+          echo "allowed_tier=$(python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1])).get("allowed_tier"); print(int(v) if v is not None else 0)' "$RUNNER_TEMP/state/stop.json")" >> "$GITHUB_OUTPUT"
           if [ "$code" -eq 0 ]; then echo "proceed=true" >> "$GITHUB_OUTPUT"; else echo "proceed=false" >> "$GITHUB_OUTPUT"; fi
           {
             echo "### STOP_IF"
@@ -271,6 +274,7 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: "1"
           GIT_ATTR_SOURCE: 4b825dc642cb6eb9a060e54bf8d69288fbee4904   # empty tree: ignore .gitattributes
+          ALLOWED_TIER: ${{ needs.preflight.outputs.allowed_tier }}
         run: |
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           BASE="$(cat "$RUNNER_TEMP/evidence/base_sha.txt")"
@@ -278,7 +282,7 @@ jobs:
           git diff --cached --binary --text --no-ext-diff --no-textconv "$BASE" -- . ':(exclude)docs/factory/runs' > "$RUNNER_TEMP/evidence/change.patch"
           git reset -q
           set +e
-          python3 -I "$RUNNER_TEMP/trusted/.factory/scripts/factory.py" check-diff --base "$BASE" > "$RUNNER_TEMP/evidence/classify.json"
+          python3 -I "$RUNNER_TEMP/trusted/.factory/scripts/factory.py" check-diff --base "$BASE" --max-tier "$ALLOWED_TIER" > "$RUNNER_TEMP/evidence/classify.json"
           code=$?
           set -e
           cat "$RUNNER_TEMP/evidence/classify.json"
@@ -304,6 +308,9 @@ jobs:
           echo "agent_failed=$(python3 -I -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["agent_failed"]).lower())' "$RUNNER_TEMP/run/ledger-out.json")" >> "$GITHUB_OUTPUT"
           cp "$RUNNER_TEMP/state/issue.json" "$RUNNER_TEMP/evidence/issue.json"
           cp "$RUNNER_TEMP/state/handoff.json" "$RUNNER_TEMP/evidence/handoff.json"
+          # Trajectory monitor (Phase C): advisory flags for the reviewer, never a reward signal.
+          python3 -I "$RUNNER_TEMP/trusted/.factory/scripts/observe.py" monitor --execution-file "${EXEC_FILE:-/nonexistent}" \
+            > "$RUNNER_TEMP/evidence/monitor.json" || echo '{"findings": [], "flagged": false}' > "$RUNNER_TEMP/evidence/monitor.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
@@ -311,9 +318,44 @@ jobs:
           path: ${{ runner.temp }}/evidence
           retention-days: 30
 
-  gates:
+  # Optional holdout scenarios (Phase B; PRAC-01, VER-13): acceptance checks kept in a separate
+  # repository the agent never sees. Fetched here, in a job that runs no agent or candidate code,
+  # with a read-only token minted from a GitHub App key; handed to the gates job as an artifact.
+  holdouts:
     needs: [preflight, implement]
-    if: needs.implement.outputs.diff_ok == 'true' && needs.implement.outputs.patch_bytes != '0'
+    if: vars.FACTORY_HOLDOUT_REPO != '' && needs.implement.outputs.diff_ok == 'true' && needs.implement.outputs.patch_bytes != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Holdout scenarios token
+        id: holdout-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_HOLDOUT_APP_ID }}
+          private-key: ${{ secrets.FACTORY_HOLDOUT_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ vars.FACTORY_HOLDOUT_REPO }}
+          permission-contents: read
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/${{ vars.FACTORY_HOLDOUT_REPO }}
+          token: ${{ steps.holdout-token.outputs.token }}
+          path: holdouts
+          persist-credentials: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: holdouts-${{ github.run_id }}
+          path: holdouts
+          include-hidden-files: false
+          retention-days: 1
+
+  gates:
+    needs: [preflight, implement, holdouts]
+    if: >-
+      always() && needs.implement.result == 'success' && needs.implement.outputs.diff_ok == 'true' &&
+      needs.implement.outputs.patch_bytes != '0' &&
+      (needs.holdouts.result == 'success' || needs.holdouts.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -329,25 +371,58 @@ jobs:
           ref: ${{ needs.implement.outputs.base_sha }}
           fetch-depth: 1
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      # Everything that runs with network or sudo happens here, BEFORE the candidate patch is
+      # applied, from the base commit only (review finding 2026-11-04: the candidate's lockfile
+      # must never choose what runs outside the sandbox).
+      - name: Sandbox and browsers from the base commit (before the candidate exists)
+        env:
+          LEVEL: ${{ needs.implement.outputs.gate_level }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/ms-playwright" >> "$GITHUB_ENV"
+          if [ "$LEVEL" = "ui" ] || [ "$LEVEL" = "deep" ]; then
+            v="$(python3 -I -c 'import json; l=json.load(open("package-lock.json")); print(((l.get("packages") or {}).get("node_modules/@playwright/test") or {}).get("version",""))')"
+            if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+              PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/ms-playwright" npm exec --yes --package="playwright@$v" -- playwright install --with-deps chromium
+            else
+              echo "::warning::no @playwright/test in the base lockfile; the e2e gate will report MISCONFIGURED"
+            fi
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: evidence-implement-${{ github.run_id }}
           path: ${{ runner.temp }}/implement
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.holdouts.result == 'success'
+        with:
+          name: holdouts-${{ github.run_id }}
+          path: ${{ runner.temp }}/holdouts
       - name: Check the patch hash, copy the trusted engine, apply the patch
         env:
           EXPECTED_SHA256: ${{ needs.implement.outputs.patch_sha256 }}
+          HOLDOUTS: ${{ needs.holdouts.result }}
         run: |
           echo "$EXPECTED_SHA256  $RUNNER_TEMP/implement/change.patch" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/evidence"
           cp -R .factory "$RUNNER_TEMP/trusted-factory"
+          if [ "$HOLDOUTS" = "success" ]; then
+            chmod +x "$RUNNER_TEMP/holdouts/run.sh" 2>/dev/null || true
+            echo "FACTORY_HOLDOUT_DIR=$RUNNER_TEMP/holdouts" >> "$GITHUB_ENV"
+          fi
           git -c user.name=factory -c user.email=factory@localhost apply --index --whitespace=nowarn "$RUNNER_TEMP/implement/change.patch"
       - name: Diff policy, authoritative (base engine and policy, before any agent code runs)
         id: policy
         env:
           FACTORY_POLICY: ${{ runner.temp }}/trusted-factory/policy.json
+          ALLOWED_TIER: ${{ needs.preflight.outputs.allowed_tier }}
         run: |
           set +e
-          python3 -I "$RUNNER_TEMP/trusted-factory/scripts/factory.py" check-diff --base HEAD > "$RUNNER_TEMP/evidence/classify.json"
+          python3 -I "$RUNNER_TEMP/trusted-factory/scripts/factory.py" check-diff --base HEAD --max-tier "$ALLOWED_TIER" > "$RUNNER_TEMP/evidence/classify.json"
           code=$?
           set -e
           cat "$RUNNER_TEMP/evidence/classify.json"
@@ -358,23 +433,17 @@ jobs:
           echo "tests_only=$(python3 -I -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["tests_only"]).lower())' "$RUNNER_TEMP/evidence/classify.json")" >> "$GITHUB_OUTPUT"
           git -c user.name=factory -c user.email=factory@localhost commit -q -m "factory candidate"
           echo "candidate=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - name: Dependencies (lockfile already checked by the diff policy; no install scripts)
         if: steps.policy.outputs.ok == 'true'
-        with:
-          node-version: 22
-      - name: Dependencies and sandbox
-        if: steps.policy.outputs.ok == 'true'
-        run: |
-          npm ci --ignore-scripts
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap >/dev/null
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+        run: npm ci --ignore-scripts
       - name: Gates (authoritative verdict, sandboxed)
         id: gates
         if: steps.policy.outputs.ok == 'true'
         env:
           LEVEL: ${{ steps.policy.outputs.gate_level }}
           FACTORY_GATES_CONF: ${{ runner.temp }}/trusted-factory/gates.conf
-          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF
+          FACTORY_POLICY: ${{ runner.temp }}/trusted-factory/policy.json
+          SANDBOX_KEEP_ENV: FACTORY_GATES_CONF FACTORY_POLICY PLAYWRIGHT_BROWSERS_PATH FACTORY_HOLDOUT_DIR
           SANDBOX_RO_GIT: "1"
           CANDIDATE: ${{ steps.policy.outputs.candidate }}
         run: |
@@ -432,6 +501,15 @@ jobs:
             ${{ runner.temp }}/evidence/classify.json
             ${{ runner.temp }}/evidence/gates.txt
             ${{ runner.temp }}/evidence/proof.txt
+          retention-days: 30
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && (steps.policy.outputs.gate_level == 'ui' || steps.policy.outputs.gate_level == 'deep')
+        with:
+          name: evidence-e2e-${{ github.run_id }}     # traces, screenshots, video (rung 5)
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: warn
           retention-days: 30
 
   verify:
@@ -546,15 +624,36 @@ jobs:
       issues: write
       statuses: write
     env:
-      GH_TOKEN: ${{ github.token }}
       RUN_ID: ${{ github.run_id }}
       ISSUE: ${{ needs.preflight.outputs.issue }}
       REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      # Phase F, optional: publish as a dedicated GitHub App (per-run installation token) instead
+      # of GITHUB_TOKEN. PRs opened by an App trigger the gates, security and preview workflows;
+      # PRs opened with GITHUB_TOKEN do not. The token is scoped to this repository and expires.
+      - name: Per-run publishing identity (optional)
+        id: publish-token
+        if: vars.FACTORY_PUBLISH_APP_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.FACTORY_PUBLISH_APP_ID }}
+          private-key: ${{ secrets.FACTORY_PUBLISH_APP_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-statuses: write
+      - name: Select the publishing token
+        env:
+          APP_TOKEN: ${{ steps.publish-token.outputs.token }}
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$APP_TOKEN" ]; then echo "::add-mask::$APP_TOKEN"; echo "GH_TOKEN=$APP_TOKEN" >> "$GITHUB_ENV"
+          else echo "GH_TOKEN=$JOB_TOKEN" >> "$GITHUB_ENV"; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          token: ${{ steps.publish-token.outputs.token || github.token }}
       - name: Copy the default branch's factory scripts (publish never runs candidate code)
         run: cp -R .factory "$RUNNER_TEMP/trusted-main"
       # Exact names, in order: implement, gates (authoritative classify.json), verify.
@@ -674,6 +773,7 @@ jobs:
               "verify_agent": j("record-verify.json").get("agent"),
               "pr_number": t("pr-number.txt"),
               "implementer_status": j("implement.json").get("status"),
+              "monitor": j("monitor.json"),
           })
           (ev / "record.json").write_text(json.dumps(rec, indent=2, sort_keys=True))
           EOF

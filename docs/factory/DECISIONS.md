@@ -90,3 +90,32 @@ must cite their run of evidence (charter §9).
   6. The outcome checks the gates job's result before its outputs.
   7. `select-item` releases claims with no activity for `stale_in_progress_hours`.
   8. `ci_fix_commits` is reserved until a CI-fix loop exists (Phase B).
+
+## 2026-11-04 — Phases B–F built offline; first product is Ink Dimensions web v1
+
+- **Decision (owner):** build factory phases B–F completely, offline, and mark every part that
+  needs live validation. Then take Ink Dimensions (web v1) through the Phase E intake as the
+  first product. Hosting is a provider-neutral container. No auto-merge: a human merges every PR.
+  The product line is confirmed as drafted.
+
+## 2026-11-04 — ADR-04 evaluated at Phase F start: no durable supervisor yet
+
+- **Triggers checked:**
+  - multi-hour resumable workflows: no (runs are under 45 minutes);
+  - idempotency required: handled by deterministic branch claims and per-run ledger files;
+  - multi-repository changes: no;
+  - more than one operator needing org identity: no (one owner);
+  - scheduled-task caps binding: no (GitHub Actions schedules).
+- **Decision:** stay on GitHub Actions. Revisit when a second operator joins, a second
+  repository onboards, or runs need to resume across hours.
+
+## 2026-11-04 — Auto-merge excluded
+
+- **Decision (owner):** no Tier 0 class is qualified for automatic merge. Phase F's
+  qualification process (spec §9.6) is not built. Every PR is merged by a human.
+- **Reason:** there is no second reviewer, and a single owner's review is the only independent check.
+
+## 2026-11-04 — Pooled sandboxes not needed
+
+- **Decision:** GitHub-hosted runners with `sandbox-exec.sh` are the sandbox. E2B or Modal
+  pools (Phase F deliverable 3) wait until runner limits bind (concurrency 1 today).

@@ -1,0 +1,17 @@
+# Dependency updates arrive as Tier 0 pull requests (version bumps only) that a human merges.
+# The factory's agents cannot install or upgrade packages (no network), so this is the path.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3

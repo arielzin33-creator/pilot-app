@@ -32,6 +32,13 @@ factory:tier-0|EDEDED|Tier 0 mechanical
 factory:tier-1|EDEDED|Tier 1 bounded change
 factory:tier-2|EDEDED|Tier 2 feature
 factory:tier-3|EDEDED|Tier 3 load-bearing
+factory:blocked|C2E0C6|Waits for dependent tasks (released by factory-backlog)
+factory:from-spec|BFD4F2|Generated from an approved tasks.md
+factory:freeze|B60205|Error budget exhausted: release and factory freeze (P0 only)
+factory:brief|FEF2C0|PR/FAQ brief under review (Phase E gate 1)
+factory:incident|D93F0B|Production signal turned into an issue (Phase D)
+factory:retro|C5DEF5|Weekly factory retrospective
+factory:preview|BFDADC|A human allows a preview deployment of a factory PR
 LABELS
 
 echo "== Ruleset on $DEFAULT_BRANCH"
@@ -63,6 +70,28 @@ if [ -n "$existing" ]; then
 else
   gh api -X POST "repos/$REPO/rulesets" --input /tmp/factory-ruleset.json >/dev/null && echo "   created ruleset"
 fi
+
+echo "== Deployment environments (Phase D)"
+OWNER_LOGIN="${OWNER_LOGIN:-$(gh api user --jq .login)}"
+OWNER_ID="$(gh api "users/$OWNER_LOGIN" --jq .id)"
+for envname in preview staging production; do
+  if [ "$envname" = production ]; then
+    # A human (the owner) approves every production deployment. prevent_self_review stays false
+    # because a solo owner both merges and approves; with a second operator, set it to true.
+    body="{\"wait_timer\":0,\"prevent_self_review\":false,\"reviewers\":[{\"type\":\"User\",\"id\":$OWNER_ID}],\"deployment_branch_policy\":{\"protected_branches\":false,\"custom_branch_policies\":true}}"
+  elif [ "$envname" = staging ]; then
+    body='{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+  else
+    body='{}'
+  fi
+  printf '%s' "$body" | gh api -X PUT "repos/$REPO/environments/$envname" --input - >/dev/null && echo "   $envname"
+  # Only the default branch may deploy to staging and production (explicit policy; rulesets
+  # may not count as "protected branches" for environments).
+  if [ "$envname" != preview ]; then
+    gh api -X POST "repos/$REPO/environments/$envname/deployment-branch-policies" -f name="$DEFAULT_BRANCH" -f type=branch >/dev/null 2>&1 || true
+  fi
+done
+echo "   Add environment secrets yourself (DEPLOY_TOKEN or DEPLOY_SSH_KEY) for the provider you choose."
 
 echo "== Repository variables (identifiers, not secrets) - set these yourself:"
 for v in ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do

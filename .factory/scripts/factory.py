@@ -316,29 +316,56 @@ def cmd_classify(args) -> int:
 def cmd_check_diff(args) -> int:
     """Post-run diff policy for unattended runs. Exit 1 when the diff must not be published."""
     root = repo_root()
-    policy = load_policy(root)
-    files = collect_diff(root, args.base)
-    pkg = package_json_changes(root, args.base, policy)
-    result = classify_files(files, policy, pkg, existing_test_files(root, args.base, policy))
+    result = check_diff(root, args.base, load_policy(root), args.max_tier)
+    return emit(result, 0 if result["ok"] else 1)
+
+
+def check_diff(root: Path, base: str, policy: dict, requested_tier: int | None = None) -> dict:
+    """The diff policy as a function (used by check-diff and the red-team suite)."""
+    files = collect_diff(root, base)
+    pkg = package_json_changes(root, base, policy)
+    result = classify_files(files, policy, pkg, existing_test_files(root, base, policy))
     stop = list(result["violations"])
-    if result["tier"] > policy["unattended_max_tier"]:
+    max_tier = allowed_unattended_tier(policy, requested_tier)
+    if result["tier"] > max_tier:
         stop.append("TIER_ABOVE_UNATTENDED")
-    if result["changed_lines"] > policy["limits"]["tier1_max_changed_lines"]:
+    limits = policy["limits"]
+    line_cap = limits["tier1_max_changed_lines"] if max_tier <= 1 else limits.get("tier2_max_changed_lines", 0)
+    file_cap = limits["tier1_max_files"] if max_tier <= 1 else limits.get("tier2_max_files", 0)
+    if result["changed_lines"] > line_cap or result["file_count"] > file_cap:
         stop.append("DIFF_TOO_LARGE")
+    result["max_tier"] = max_tier
     secrets = []
     for f in files:
         fp = root / f["path"]
         if fp.is_file() and fp.stat().st_size < 2_000_000:
             secrets += scan_text_for_keys(f["path"], fp.read_text(encoding="utf-8", errors="ignore"))
-    patch = git(root, *_GIT_DIFF, "--text", "--no-ext-diff", "--no-textconv", args.base, check=False)
+    patch = git(root, *_GIT_DIFF, "--text", "--no-ext-diff", "--no-textconv", base, check=False)
     secrets += [dict(s, path=s["path"] + " (diff)") for s in scan_text_for_keys("<patch>", patch)]
     if secrets:
         stop.append("SECRET_IN_DIFF")
         result["secret_findings"] = secrets
+    # Supply chain before anything is installed: a changed lockfile must satisfy the dependency
+    # policy here, because the gates job runs `npm ci` from it (review finding 2026-11-04).
+    if (root / "package-lock.json").is_file() and any(f["path"] in ("package-lock.json", "package.json") for f in files):
+        lock = lockfile_check(root, policy)
+        if not lock["ok"]:
+            stop.append("LOCKFILE_POLICY")
+            result["lockfile_violations"] = lock["violations"]
     result["stop_reasons"] = sorted(set(stop))
     result["ok"] = not result["stop_reasons"]
     result["package_json"] = pkg
-    return emit(result, 0 if result["ok"] else 1)
+    return result
+
+
+def allowed_unattended_tier(policy: dict, requested: int | None = None) -> int:
+    """The highest tier a run may publish. Tier 2 only when the policy allows it with an
+    approved spec (the caller, preflight, has verified the spec); Tier 3 never."""
+    base = int(policy["unattended_max_tier"])
+    if requested is None:
+        return base
+    ceiling = 2 if policy.get("tier2_unattended_with_approved_spec") else base
+    return max(base, min(int(requested), ceiling, 2))
 
 
 def predict_tier(expected_files: list[str], policy: dict) -> dict:
@@ -354,7 +381,7 @@ def predict_tier(expected_files: list[str], policy: dict) -> dict:
 
 HANDOFF_MARKER = "<!-- factory-handoff:v1 -->"
 HANDOFF_FIELDS = {"disposition", "done_when", "files_expected", "load_bearing",
-                  "gate_level", "confidence", "triaged_at", "predicted_tier"}
+                  "gate_level", "confidence", "triaged_at", "predicted_tier", "spec"}
 
 
 def parse_handoff_body(body: str) -> dict | None:
@@ -431,6 +458,8 @@ def evaluate_stop_if(state: dict, policy: dict) -> dict:
         stop("CHARTER_NOT_READY", f"charter_status is {policy.get('charter_status')!r}; a human must review and set it to 'ready'")
     if state.get("paused"):
         stop("FACTORY_PAUSED", "factory paused by FACTORY_PAUSED variable or .factory/PAUSED file")
+    if state.get("freeze"):
+        stop("RELEASE_FREEZE", "error budget exhausted: factory:freeze is set (SLO policy); only P0 fixes by humans")
     if state.get("awaiting_review_count", 0) >= limits["review_queue_max"]:
         stop("REVIEW_QUEUE_FULL", f"{state.get('awaiting_review_count')} items awaiting review; limit {limits['review_queue_max']}")
     if state.get("spend_today_usd", 0.0) >= limits["daily_budget_usd"]:
@@ -442,7 +471,7 @@ def evaluate_stop_if(state: dict, policy: dict) -> dict:
     item = state.get("item")
     if not item:
         stop("NO_ITEM", "no eligible queue item")
-        return {"stop": True, "reasons": reasons, "detail": detail}
+        return {"stop": True, "reasons": reasons, "detail": detail, "allowed_tier": policy["unattended_max_tier"]}
 
     labels = set(item.get("labels", []))
     if "factory:needs-human" in labels or "factory:human-only" in labels:
@@ -466,8 +495,15 @@ def evaluate_stop_if(state: dict, policy: dict) -> dict:
             item["predicted_tier"] = pred["tier"]
             if "LOAD_BEARING_TOUCHED" in pred["violations"]:
                 stop("LOAD_BEARING_EXPECTED", "expected files include load-bearing paths: " + "; ".join(pred["reasons"]))
-            if pred["tier"] > policy["unattended_max_tier"]:
-                stop("TIER_NOT_UNATTENDED", f"predicted tier {pred['tier']} > unattended max {policy['unattended_max_tier']}")
+            allowed = policy["unattended_max_tier"]
+            if pred["tier"] == 2 and policy.get("tier2_unattended_with_approved_spec"):
+                if item.get("spec_implementable"):
+                    allowed = 2
+                else:
+                    stop("SPEC_NOT_APPROVED", "tier 2 needs a hand-off citing a spec whose spec, plan and tasks are approved")
+            item["allowed_tier"] = allowed
+            if pred["tier"] > allowed and "SPEC_NOT_APPROVED" not in reasons:
+                stop("TIER_NOT_UNATTENDED", f"predicted tier {pred['tier']} > unattended max {allowed}")
         if str(handoff.get("load_bearing", "false")).lower() == "true":
             stop("LOAD_BEARING_EXPECTED", "handoff declares load_bearing: true")
     raised = [lab for lab in labels if lab.startswith("factory:tier-")]
@@ -476,7 +512,7 @@ def evaluate_stop_if(state: dict, policy: dict) -> dict:
             t = int(lab.rsplit("-", 1)[1])
         except ValueError:
             continue
-        if t > policy["unattended_max_tier"]:
+        if t > item.get("allowed_tier", policy["unattended_max_tier"]):
             stop("TIER_NOT_UNATTENDED", f"label {lab} raises the tier above the unattended maximum")
     runs = item.get("runs", [])
     red = sum(1 for r in runs if r.get("outcome") in ("red", "misconfigured"))
@@ -494,7 +530,8 @@ def evaluate_stop_if(state: dict, policy: dict) -> dict:
             seen.add(r)
             ordered.append(r)
     return {"stop": bool(ordered), "reasons": ordered, "detail": detail,
-            "predicted_tier": item.get("predicted_tier")}
+            "predicted_tier": item.get("predicted_tier"),
+            "allowed_tier": item.get("allowed_tier", policy["unattended_max_tier"])}
 
 
 def cmd_stop_if(args) -> int:
@@ -519,7 +556,7 @@ def cmd_select_item(args) -> int:
         labels = {(lab.get("name") if isinstance(lab, dict) else lab) for lab in issue.get("labels", [])}
         if "factory:ready-to-implement" not in labels:
             continue
-        if labels & {"factory:needs-human", "factory:human-only"}:
+        if labels & {"factory:needs-human", "factory:human-only", "factory:blocked", "factory:freeze"}:
             continue
         if "factory:in-progress" in labels:
             # A claim with no activity for stale_in_progress_hours is abandoned (a run that died
@@ -604,7 +641,7 @@ def cmd_render_prompt(args) -> int:
         "GATES_LINE": sanitize_untrusted(str(extra.get("gates_line", "")), 500),
         "PROOF_LINE": sanitize_untrusted(str(extra.get("proof_line", "")), 500),
     }
-    if values["GATE_LEVEL"] not in ("fast", "full", "deep"):
+    if values["GATE_LEVEL"] not in ("fast", "full", "ui", "deep"):
         return emit_error(f"invalid gate level {values['GATE_LEVEL']!r}")
     template = Path(args.template).read_text(encoding="utf-8")
     try:
@@ -751,6 +788,67 @@ def cmd_hook_guard(args) -> int:
 
 
 # ---------------------------------------------------------------------------------------
+# Dependency and lockfile gate (spec §6.5, Phase B deliverable 7)
+# ---------------------------------------------------------------------------------------
+
+_BAD_SPEC = re.compile(r"^(git\+|git:|github:|gitlab:|bitbucket:|https?:|file:|link:|\.{0,2}/)", re.I)
+
+
+def lockfile_check(root: Path, policy: dict) -> dict:
+    dep = policy.get("dependency_policy") or {}
+    registries = tuple(dep.get("registries") or ["https://registry.npmjs.org/"])
+    allowed_scripts = dep.get("install_scripts_allowed") or []
+    violations: list[str] = []
+    install_scripts: list[str] = []
+    pkg_path, lock_path = root / "package.json", root / "package-lock.json"
+    if not lock_path.is_file():
+        return {"ok": False, "violations": ["package-lock.json missing"], "install_scripts": []}
+    try:
+        pkg = json.loads(pkg_path.read_text(encoding="utf-8")) if pkg_path.is_file() else {}
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "violations": [f"unparseable manifest: {exc}"], "install_scripts": []}
+    for section in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        for name, spec in (pkg.get(section) or {}).items():
+            if isinstance(spec, str) and _BAD_SPEC.match(spec.strip()):
+                violations.append(f"package.json {section}.{name}: non-registry specifier {spec!r}")
+    if lock.get("lockfileVersion", 0) < 2:
+        violations.append(f"lockfileVersion {lock.get('lockfileVersion')} < 2 (regenerate with npm >= 7)")
+    if pkg and lock.get("name") not in (None, pkg.get("name")):
+        violations.append("package-lock.json name does not match package.json")
+    for path, entry in (lock.get("packages") or {}).items():
+        if path == "":
+            continue
+        if entry.get("link") or not (path.startswith("node_modules/") or "/node_modules/" in path):
+            # Linked, workspace or local packages run repository code under a package's name
+            # (for example a fake node_modules/.bin/playwright). Never allowed in 0.x.
+            violations.append(f"{path}: linked, workspace or local package (only registry packages are allowed)")
+            continue
+        name = path.rsplit("node_modules/", 1)[-1]
+        if entry.get("name") and entry["name"] != name:
+            violations.append(f"{name}: npm alias for {entry['name']!r} (aliases are not allowed)")
+        resolved = entry.get("resolved", "")
+        if not resolved.startswith(registries):
+            violations.append(f"{name}: resolved from {resolved or '(nothing)'} (not an allowed registry)")
+        if not str(entry.get("integrity", "")).startswith(dep.get("min_integrity", "sha512") + "-"):
+            violations.append(f"{name}: missing or weak integrity hash")
+        if entry.get("hasInstallScript"):
+            install_scripts.append(name)
+            if not matches_any(name, allowed_scripts):
+                violations.append(f"{name}: has an install script and is not in install_scripts_allowed")
+    return {"ok": not violations, "violations": violations, "install_scripts": sorted(set(install_scripts)),
+            "packages": sum(1 for p in (lock.get("packages") or {}) if p)}
+
+
+def cmd_lockfile_check(args) -> int:
+    root = Path(args.root).resolve() if args.root else repo_root()
+    policy = load_policy(root) if (root / POLICY_REL).is_file() or os.environ.get("FACTORY_POLICY") else \
+        load_policy(Path(__file__).resolve().parents[2])
+    result = lockfile_check(root, policy)
+    return emit(result, 0 if result["ok"] else 1)
+
+
+# ---------------------------------------------------------------------------------------
 # Settings rendering: absolute sandbox paths (spec §4.4)
 # ---------------------------------------------------------------------------------------
 
@@ -860,20 +958,27 @@ WORKFLOW_PATTERNS = [
 ]
 
 
-def scan_text_for_keys(path: str, text: str) -> list[dict]:
+def scan_text_for_keys(path: str, text: str, allowed_secrets: set[str] | None = None) -> list[dict]:
     findings = []
+    allowed_secrets = allowed_secrets or set()
     for name, rx in KEY_PATTERNS:
         for m in re.finditer(rx, text):
             findings.append({"path": path, "kind": name, "line": text[:m.start()].count("\n") + 1})
     if path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml")):
         for name, rx in WORKFLOW_PATTERNS:
             for m in re.finditer(rx, text, flags=re.M):
+                if name == "non-github-secret" and m.group(0).split(".", 1)[1].strip() in allowed_secrets:
+                    continue
                 findings.append({"path": path, "kind": name, "line": text[:m.start()].count("\n") + 1})
     return findings
 
 
 def cmd_scan_keys(args) -> int:
     root = repo_root()
+    try:
+        allowed = {k for k in (load_policy(root).get("allowed_workflow_secrets") or {}) if not k.startswith("_")}
+    except SystemExit:
+        allowed = set()
     tracked = git(root, "ls-files", "-z").split("\0")
     candidates = [p for p in tracked + git(root, "ls-files", "-z", "--others", "--exclude-standard").split("\0") if p]
     findings = []
@@ -887,7 +992,7 @@ def cmd_scan_keys(args) -> int:
             text = fp.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
-        findings += scan_text_for_keys(rel, text)
+        findings += scan_text_for_keys(rel, text, allowed)
     env_hits = [k for k in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN")
                 if os.environ.get(k)]
     for k in env_hits:
@@ -1080,6 +1185,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("check-diff", help="post-run diff policy; exit 1 if the diff must not be published")
     s.add_argument("--base", required=True)
+    s.add_argument("--max-tier", type=int, help="tier allowed by preflight (2 only with an approved spec)")
     s.set_defaults(fn=cmd_check_diff)
 
     s = sub.add_parser("predict-tier", help="predict the tier from expected file paths (triage)")
@@ -1109,6 +1215,10 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("hook-guard", help="PreToolUse hook: reads hook JSON on stdin; exit 2 blocks")
     s.set_defaults(fn=cmd_hook_guard)
+
+    s = sub.add_parser("lockfile-check", help="dependency and lockfile policy (registry, integrity, scripts)")
+    s.add_argument("--root", help="repository root (default: git top-level)")
+    s.set_defaults(fn=cmd_lockfile_check)
 
     s = sub.add_parser("render-settings", help="write Claude Code settings with absolute sandbox paths")
     s.add_argument("--in", dest="input", required=True)

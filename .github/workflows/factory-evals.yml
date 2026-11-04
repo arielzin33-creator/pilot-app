@@ -1,0 +1,46 @@
+# factory-evals: keep the eval suite valid and the harness honest (spec §5.4, Phase C).
+# On every change to evals/ or the harness: every task's reference solution passes and its
+# no-op fails, and the harness regression tests (mocked agents) pass. Model runs need Anthropic
+# access and are started by the owner (see docs/factory/EVALS.md); no agent runs here.
+
+name: factory-evals
+
+on:
+  pull_request:
+    paths: [evals/**, .factory/scripts/evals.py, .factory/scripts/judge.py]
+  push:
+    branches: [main]
+    paths: [evals/**, .factory/scripts/evals.py, .factory/scripts/judge.py]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts
+      - name: Task validity (reference passes, no-op fails) and harness self-test
+        run: |
+          if [ -d evals/tasks ] && ls evals/tasks/*/task.json >/dev/null 2>&1; then
+            python3 -I .factory/scripts/evals.py validate | tee "$RUNNER_TEMP/validate.json"
+            python3 -I .factory/scripts/evals.py run --agent reference --trials 1 --out "$RUNNER_TEMP/ref.json" --harness self-test
+            python3 -I .factory/scripts/evals.py run --agent noop --trials 1 --out "$RUNNER_TEMP/noop.json" --harness self-test
+            python3 -I -c 'import json,sys
+          ref=json.load(open(sys.argv[1]))["metrics"]; noop=json.load(open(sys.argv[2]))["metrics"]
+          assert ref["pass_at_1"]==1.0, ("reference must solve every task", ref)
+          assert noop["pass_at_1"]==0.0, ("no-op must solve nothing", noop)
+          print("harness self-test OK")' "$RUNNER_TEMP/ref.json" "$RUNNER_TEMP/noop.json"
+          else
+            echo "No eval tasks yet (evals/tasks/<id>/task.json); see docs/factory/EVALS.md." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi

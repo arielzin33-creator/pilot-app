@@ -1,0 +1,47 @@
+# factory-redteam: replay the standing injection suite against every deterministic layer
+# (spec §6.7, CI hardening item 17) weekly, on factory configuration changes, and on demand.
+# No agent and no secrets. A live-model replay is a separate, manual step (MANUAL-CONNECTIONS.md).
+
+name: factory-redteam
+
+on:
+  push:
+    branches: [main]
+    paths: [.factory/**, .claude/**, .github/workflows/**]
+  pull_request:
+    paths: [.factory/**, .claude/**, .github/workflows/**]
+  schedule:
+    - cron: "47 4 * * 1"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  redteam:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Trusted engine from the base commit (a PR cannot weaken the layer it is tested against)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/trusted"
+          git archive "$BASE_SHA" .factory | tar -x -C "$RUNNER_TEMP/trusted"
+      - name: Replay the base suite against the base engine and the candidate engine
+        run: |
+          python3 -I "$RUNNER_TEMP/trusted/.factory/scripts/redteam.py" > "$RUNNER_TEMP/base.json"
+          python3 -I .factory/scripts/redteam.py --cases "$RUNNER_TEMP/trusted/.factory/redteam/cases.json" > "$RUNNER_TEMP/candidate.json"
+          python3 -I .factory/scripts/redteam.py > "$RUNNER_TEMP/candidate-own.json"
+          python3 -I -c 'import json,sys
+          for f in sys.argv[1:]:
+              d=json.load(open(f)); print(f.rsplit("/",1)[-1], d["blocked"], "/", d["cases"])
+              for x in d["failed"]: print("  NOT BLOCKED:", x["id"], x["ref"], x["detail"])' "$RUNNER_TEMP"/base.json "$RUNNER_TEMP"/candidate.json "$RUNNER_TEMP"/candidate-own.json | tee -a "$GITHUB_STEP_SUMMARY"
+          for f in base candidate candidate-own; do
+            python3 -I -c 'import json,sys; sys.exit(1 if json.load(open(sys.argv[1]))["failed"] else 0)' "$RUNNER_TEMP/$f.json"
+          done

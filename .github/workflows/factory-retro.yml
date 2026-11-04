@@ -1,0 +1,75 @@
+# factory-retro: weekly retrospective input (spec §9.3, Phase C deliverable 8). Builds the
+# factory health dashboard from the ledger and opens one proposal issue. Proposal only: a human
+# decides any change to the charter, policy or gates.
+
+name: factory-retro
+
+on:
+  schedule:
+    - cron: "7 6 * * 5"
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  retro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ledger, dashboard and weekly numbers
+        run: |
+          mkdir -p "$RUNNER_TEMP/ledger" "$RUNNER_TEMP/out"
+          if git ls-remote --exit-code --heads origin factory/ledger >/dev/null 2>&1; then
+            git fetch --quiet --depth 1 origin factory/ledger:refs/remotes/origin/factory/ledger
+            git archive refs/remotes/origin/factory/ledger | tar -x -C "$RUNNER_TEMP/ledger"
+          fi
+          gh pr list -R "$REPO" --state merged --search "head:claude/fq- merged:>=$(date -u -d '7 days ago' +%F)" \
+            --json number > "$RUNNER_TEMP/merged.json"
+          python3 -I .factory/scripts/observe.py dashboard --ledger-dir "$RUNNER_TEMP/ledger" --days 7 \
+            --merged-json "$RUNNER_TEMP/merged.json" --out "$RUNNER_TEMP/out/health.html" --json "$RUNNER_TEMP/out/health.json"
+          python3 -I .factory/scripts/factory.py reconcile --ledger-dir "$RUNNER_TEMP/ledger" \
+            --merged-json "$RUNNER_TEMP/merged.json" > "$RUNNER_TEMP/out/reconcile.json" || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: art
+        with:
+          name: factory-health-${{ github.run_id }}
+          path: ${{ runner.temp }}/out
+          retention-days: 90
+      - name: Open the retro issue
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -I - "$RUNNER_TEMP/out/health.json" > "$RUNNER_TEMP/body.md" <<'PY'
+          import json, sys, os
+          h = json.load(open(sys.argv[1]))
+          def v(x, money=False):
+              return "n/a" if x is None else (f"${x:,.2f}" if money else str(x))
+          print(f"## Factory retro, week ending {os.popen('date -u +%F').read().strip()}\n")
+          print("| Measure | Value |\n|---|---|")
+          for k, label, m in [("runs","Runs",0),("publish_rate","Publish rate",0),("merged_prs","Merged factory PRs",0),
+                              ("cost_per_merged_pr_usd","Cost per merged PR (estimate)",1),("verification_tax","Verification tax",0),
+                              ("cache_read_share","Cache-read share",0)]:
+              print(f"| {label} | {v(h.get(k), bool(m))} |")
+          print("\n**Outcomes:** " + (", ".join(f"{k}: {n}" for k, n in sorted(h.get("outcomes", {}).items())) or "none"))
+          print("\n**Monitor flags:** " + (", ".join(f"{k}: {n}" for k, n in sorted(h.get("monitor_flags", {}).items())) or "none"))
+          print("\n### Review (a human answers; this issue proposes, it decides nothing)\n")
+          print("- [ ] Read three transcripts: one published, one red, one escalated (spec §5.4: failures should seem fair).")
+          print("- [ ] Any escaped defect this week? If yes, tighten the gate that missed it and record it in DECISIONS.md.")
+          print("- [ ] Any STOP_IF firing repeatedly? Fix the cause, not the limit.")
+          print("- [ ] Reconcile cost estimates with the Console billing export (factory.py reconcile --billing-csv).")
+          PY
+          echo "" >> "$RUNNER_TEMP/body.md"
+          echo "Dashboard: artifact \`factory-health-${{ github.run_id }}\` in $RUN_URL" >> "$RUNNER_TEMP/body.md"
+          gh issue create -R "$REPO" --title "Factory retro: week ending $(date -u +%F)" \
+            --label factory:retro --body-file "$RUNNER_TEMP/body.md"

@@ -1,0 +1,97 @@
+# factory-backlog: approved tasks.md -> GitHub issues with trusted hand-offs (Phase E, §10.5
+# deliverable 4), and release of blocked tasks once their dependencies are closed.
+#
+# No agent and no project code runs here. The spec folder must have spec, plan and tasks all
+# approved in the default branch; intake.py refuses otherwise. Hand-off comments are written by
+# github-actions[bot], which the triage and implement workflows trust.
+
+name: factory-backlog
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "Spec folder, for example specs/001-ink-dimensions-web-v1"
+        required: true
+  issues:
+    types: [closed]
+  schedule:
+    - cron: "33 5 * * 1-5"
+
+permissions: {}
+
+concurrency:
+  group: factory-backlog
+  cancel-in-progress: false
+
+jobs:
+  backlog:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SPEC: ${{ inputs.spec }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generate the backlog (approved specs only)
+        run: |
+          case "$SPEC" in specs/[0-9][0-9][0-9]-*) ;; *) echo "::error::spec must be specs/NNN-name"; exit 1 ;; esac
+          python3 -I .factory/scripts/intake.py spec-check "$SPEC" --gate tasks
+          python3 -I .factory/scripts/intake.py backlog "$SPEC" --out "$RUNNER_TEMP/issues.json"
+      - name: Create issues and hand-offs (idempotent by task marker)
+        run: |
+          gh issue list -R "$REPO" --state all --label factory:from-spec --limit 1000 \
+            --json number,body > "$RUNNER_TEMP/existing.json"
+          python3 -I - "$RUNNER_TEMP/issues.json" "$RUNNER_TEMP/existing.json" > "$RUNNER_TEMP/todo.json" <<'PY'
+          import json, re, sys
+          new = json.load(open(sys.argv[1])); have = json.load(open(sys.argv[2]))
+          seen = {m.group(1) for i in have for m in [re.search(r"<!-- factory-task: (\S+) -->", i.get("body") or "")] if m}
+          print(json.dumps([i for i in new if i["marker"] not in seen]))
+          PY
+          python3 -I -c 'import json,sys
+          for i in json.load(open(sys.argv[1])): print(i["task_id"])' "$RUNNER_TEMP/todo.json" | while read -r task; do
+            python3 -I -c 'import json,sys
+          i=next(x for x in json.load(open(sys.argv[1])) if x["task_id"]==sys.argv[2])
+          open(sys.argv[3]+"/body.md","w").write(i["body"]); open(sys.argv[3]+"/title.txt","w").write(i["title"])
+          print(",".join(i["labels"]))' "$RUNNER_TEMP/todo.json" "$task" "$RUNNER_TEMP" > "$RUNNER_TEMP/labels.txt"
+            # Hand-off first, ready label last: the implement workflow must never see a ready
+            # issue without its hand-off.
+            other="$(tr ',' '\n' < "$RUNNER_TEMP/labels.txt" | grep -v '^factory:ready-to-implement$' | paste -sd, -)"
+            url="$(gh issue create -R "$REPO" --title "$(cat "$RUNNER_TEMP/title.txt")" --body-file "$RUNNER_TEMP/body.md" --label "$other")"
+            python3 -I .factory/scripts/intake.py handoff-text --issues-json "$RUNNER_TEMP/todo.json" --task "$task" > "$RUNNER_TEMP/handoff.md"
+            gh issue comment "${url##*/}" -R "$REPO" --body-file "$RUNNER_TEMP/handoff.md" >/dev/null
+            if grep -q 'factory:ready-to-implement' "$RUNNER_TEMP/labels.txt"; then
+              gh issue edit "${url##*/}" -R "$REPO" --add-label factory:ready-to-implement >/dev/null
+            fi
+            echo "$task -> #${url##*/}" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  unblock:
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Release tasks whose dependencies are closed
+        run: |
+          gh issue list -R "$REPO" --state all --label factory:from-spec --limit 1000 \
+            --json number,state,body,labels > "$RUNNER_TEMP/all.json"
+          python3 -I .factory/scripts/intake.py unblock --issues-json "$RUNNER_TEMP/all.json" > "$RUNNER_TEMP/unblock.json"
+          for n in $(python3 -I -c 'import json,sys; print(" ".join(map(str, json.load(open(sys.argv[1]))["unblock"])))' "$RUNNER_TEMP/unblock.json"); do
+            gh issue edit "$n" -R "$REPO" --remove-label factory:blocked && echo "unblocked #$n" >> "$GITHUB_STEP_SUMMARY"
+          done

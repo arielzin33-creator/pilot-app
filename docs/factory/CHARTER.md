@@ -28,7 +28,7 @@ touches. A human label `factory:tier-N` can raise a tier; nothing can lower it.
 |---|---|---|---|---|
 | 0 Mechanical | Documentation only; dependency version bumps with no new dependency | One human merges on evidence | `fast` (docs) or `full` | Yes |
 | 1 Bounded change | Bug fix or small feature in one module; at most 5 files and 400 changed lines; no load-bearing path; acceptance criteria present | One human reads the evidence pack and merges | `full` | Yes |
-| 2 Feature | UI files, public API, more than 5 files or 400 lines, new or removed dependency | Spec approved by a human first; one human reviewer | `full` plus click-through (Phase B) | **No** |
+| 2 Feature | UI files, public API, more than 5 files or 400 lines (up to 15 files and 1,200 lines), new or removed dependency | Spec, plan and tasks approved by a human first; one human reviewer merges | `ui`: `full` plus end-to-end click-through with traces and screenshots | **Only with an approved spec** (Phase B; `SPEC_NOT_APPROVED` otherwise) |
 | 3 Load-bearing | Any path in `load_bearing`, `package.json` scripts or engines, test and lint configuration, existing test files | Two independent human approvals | `deep` | **Never** |
 
 **No second reviewer is available (decision of 2026-11-04).** Tier 3 changes therefore never
@@ -121,10 +121,10 @@ A proof that cannot run is `MISCONFIGURED`, never a pass.
 ```
 GATES:
   docs_only: fast
-  tier0: full
+  tier0: full   (types lint test build deps)
   tier1: full
-  tier2: full   (plus click-through from Phase B)
-  tier3: deep
+  tier2: ui     (full plus e2e click-through, rung 5)
+  tier3: deep   (full plus audit and architecture; human-run)
 ```
 
 ## 7. Stop conditions
@@ -146,6 +146,8 @@ workflow reports; every code is exercised by `tests/`.
 | `AMBIGUOUS` | the handoff lacks `done_when` or expected files, or confidence is low |
 | `LOAD_BEARING_EXPECTED` | the expected files include a load-bearing path |
 | `TIER_NOT_UNATTENDED` | the predicted or labeled tier exceeds the unattended maximum |
+| `SPEC_NOT_APPROVED` | a Tier 2 item whose hand-off does not cite a spec folder with spec, plan and tasks all approved (Phase B spec gate) |
+| `RELEASE_FREEZE` | an open issue carries `factory:freeze` (error budget exhausted, Phase D SLO policy); humans ship P0 fixes only |
 | `RED_GATES_TWICE` | gates were red twice on this item |
 | `TOO_MANY_RUNS` | three runs on this item |
 | `TOO_MANY_CI_FIX` | three CI-fix commits on this item. *Reserved:* Phase A has no CI-fix loop (the factory does not push follow-up commits to its PRs), so the count is always 0; the code is tested and takes effect when Phase B adds the loop. |
@@ -184,3 +186,13 @@ Review this charter deliberately, not continuously.
 LAST_REVIEWED: <YYYY-MM-DD>
 NEXT_REVIEW: <YYYY-MM-DD>
 ```
+
+## 10. The five questions (LIFE-23), answered before any unattended run
+
+| Question | Answer in this factory |
+|---|---|
+| What does done look like? | Section 5 (`DONE`): green gates at the required level, the failing-test proof, the diff policy, no keys in the diff, and a reviewable PR body. |
+| Can the agent check its own work? | Yes, but its word is not accepted. `gates.sh` runs in the Stop hook while it works. The authoritative verdict comes from a separate job, sandboxed, using the trusted engine. That job holds no secrets: optional holdouts arrive as an artifact from a job that runs no candidate code. |
+| What may it touch? | Tier 0–1 paths; Tier 2 only with an approved spec. Never load-bearing paths (section 2) or existing tests (section 3). Enforced by the guard hook, the sandbox and the diff policy. |
+| What stops it? | The STOP_IF conditions in section 7, the per-run and daily budgets in section 8, the wall-clock timeout, and the pause switch (`FACTORY_PAUSED`). |
+| Who signs off on what cannot be taken back? | The owner merges every pull request. Production deployments wait for the owner's approval on the `production` environment. Migrations, authentication, payments and CI changes are made by humans only. |
