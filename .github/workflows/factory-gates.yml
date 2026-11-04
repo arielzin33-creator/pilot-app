@@ -1,0 +1,80 @@
+# factory-gates: the required status check `factory/gates` for every pull request and for the
+# default branch (STOP_IF uses the default branch status: BASE_NOT_GREEN).
+#
+# Runs with a read-only token plus statuses: write. No secrets, no agent.
+# Note: pull requests opened by the factory with the job token do not trigger workflows; the
+# publish job posts the same status itself. Human pushes and "ready for review" re-run this.
+
+name: factory-gates
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      statuses: write
+    env:
+      HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Classify the change (pull requests)
+        id: cls
+        run: |
+          level=full
+          if [ -n "$BASE_SHA" ]; then
+            git fetch --quiet --depth 1 origin "$BASE_SHA" || true
+            python3 -I .factory/scripts/factory.py classify --base "$BASE_SHA" | tee "$RUNNER_TEMP/classify.json"
+            level="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["gate_level"])' "$RUNNER_TEMP/classify.json")"
+          fi
+          echo "level=$level" >> "$GITHUB_OUTPUT"
+      - name: Configuration hashes and key scan
+        id: trust
+        run: |
+          set +e
+          python3 -I .factory/scripts/factory.py config-hashes; h=$?
+          python3 -I .factory/scripts/factory.py scan-keys; k=$?
+          set -e
+          echo "ok=$([ $h -eq 0 ] && [ $k -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Gates
+        id: gates
+        env:
+          LEVEL: ${{ steps.cls.outputs.level }}
+        run: |
+          set +e
+          ./.factory/scripts/gates.sh "$LEVEL" | tee "$RUNNER_TEMP/gates.log"
+          set -e
+          line="$(grep '^FACTORY_GATES:' "$RUNNER_TEMP/gates.log" | tail -1)"
+          echo "line=${line:-FACTORY_GATES: status=MISCONFIGURED reason=no-verdict-line}" >> "$GITHUB_OUTPUT"
+      - name: Post factory/gates status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINE: ${{ steps.gates.outputs.line }}
+          TRUST_OK: ${{ steps.trust.outputs.ok }}
+        run: |
+          state=failure
+          case "$LINE" in *status=GREEN*) [ "$TRUST_OK" = "true" ] && state=success ;; esac
+          desc="$LINE"; [ "$TRUST_OK" = "true" ] || desc="config hash or key scan failed; $LINE"
+          gh api -X POST "repos/${{ github.repository }}/statuses/$HEAD_SHA" -f state="$state" \
+            -f context="factory/gates" -f description="${desc:0:139}" >/dev/null || \
+            echo "::warning::could not post status (fork pull request?)"
+          [ "$state" = "success" ]

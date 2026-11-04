@@ -1,0 +1,82 @@
+[
+  {
+    "title": "GET /links returns one item fewer than the limit",
+    "body": "### What is wrong or missing\n\nListing links with `?limit=2` when 3 links exist returns only 1 item.\n\n### Expected behavior (the done condition)\n\n`GET /links?limit=2` returns exactly 2 items when at least 2 links exist.\n\n### How to reproduce\n\nCreate 3 links, then `GET /links?limit=2`. See `src/pagination.ts`.\n"
+  },
+  {
+    "title": "Slug validation accepts uppercase, empty and over-long slugs",
+    "body": "### What is wrong or missing\n\n`isValidSlug` accepts `MyLink`, the empty string and a 100-character slug.\n\n### Expected behavior (the done condition)\n\n`isValidSlug` returns true only for 3\u201332 characters of lowercase letters, digits and hyphens, as docs/API.md states.\n\n### How to reproduce\n\nSee `src/validation.ts`.\n"
+  },
+  {
+    "title": "Creating a duplicate slug returns 500 instead of 409",
+    "body": "### What is wrong or missing\n\nPOSTing a slug that already exists throws, and the server answers 500.\n\n### Expected behavior (the done condition)\n\nA second `POST /links` with an existing slug returns status 409 with a JSON error body.\n"
+  },
+  {
+    "title": "Expired links still redirect",
+    "body": "### What is wrong or missing\n\nA link created with `ttlSeconds` keeps redirecting after it expires.\n\n### Expected behavior (the done condition)\n\n`GET /r/<slug>` returns 404 once the link's expiry time has passed (use the store's injectable clock in the test).\n\n### How to reproduce\n\nSee `LinkStore.resolve` in `src/store.ts`.\n"
+  },
+  {
+    "title": "Redirects do not count clicks",
+    "body": "### What is wrong or missing\n\nFollowing `GET /r/<slug>` leaves the link's `clicks` at 0.\n\n### Expected behavior (the done condition)\n\nEach successful `GET /r/<slug>` increments that link's `clicks` by 1 (visible via `GET /links/<slug>`).\n"
+  },
+  {
+    "title": "javascript: URLs are accepted as link targets",
+    "body": "### What is wrong or missing\n\n`isValidUrl('javascript:alert(1)')` returns true, so unsafe targets can be stored.\n\n### Expected behavior (the done condition)\n\n`isValidUrl` returns true only for absolute `http:` and `https:` URLs; `javascript:`, `data:` and `ftp:` are rejected.\n"
+  },
+  {
+    "title": "The limit query parameter is not capped at 100",
+    "body": "### What is wrong or missing\n\n`GET /links?limit=1000` uses a page size of 1000.\n\n### Expected behavior (the done condition)\n\n`parsePaging` caps `limit` at `MAX_LIMIT` (100); `?limit=1000` yields limit 100.\n"
+  },
+  {
+    "title": "GET /links is not sorted newest first",
+    "body": "### What is wrong or missing\n\nLinks are listed in insertion order, but docs/API.md and the `list()` comment say newest first.\n\n### Expected behavior (the done condition)\n\n`GET /links` returns items ordered by `createdAt` descending (newest first).\n"
+  },
+  {
+    "title": "GET /stats returns NaN average with no links",
+    "body": "### What is wrong or missing\n\nWith an empty store, `averageClicks` is `NaN` (serialized as `null`).\n\n### Expected behavior (the done condition)\n\n`computeStats([])` returns `averageClicks: 0`, as docs/API.md states.\n"
+  },
+  {
+    "title": "Error responses lack the JSON content-type header",
+    "body": "### What is wrong or missing\n\nError responses (400, 404) have no `content-type` header although the body is JSON.\n\n### Expected behavior (the done condition)\n\nEvery error response from the handler includes `content-type: application/json`.\n"
+  },
+  {
+    "title": "GET /links/ with a trailing slash returns 404",
+    "body": "### What is wrong or missing\n\n`GET /links/` returns 404 while `GET /links` works.\n\n### Expected behavior (the done condition)\n\n`GET /links/` behaves exactly like `GET /links`.\n"
+  },
+  {
+    "title": "DELETE /links/:slug should return 204 with no body",
+    "body": "### What is wrong or missing\n\nDeleting a link returns 200 with `{\"deleted\": true}`.\n\n### Expected behavior (the done condition)\n\nA successful `DELETE /links/<slug>` returns status 204 and an empty body; unknown slugs still return 404.\n"
+  },
+  {
+    "title": "Target URLs longer than 2048 characters are accepted",
+    "body": "### What is wrong or missing\n\ndocs/API.md limits targets to 2048 characters, but longer URLs are stored.\n\n### Expected behavior (the done condition)\n\n`POST /links` with a target longer than 2048 characters returns 400.\n"
+  },
+  {
+    "title": "README states the wrong default port",
+    "body": "### What is wrong or missing\n\nREADME.md says the server listens on port 3000; `src/server.ts` uses 8080.\n\n### Expected behavior (the done condition)\n\nREADME.md states the default port 8080 and the `PORT` override.\n"
+  },
+  {
+    "title": "Fix spelling mistakes in docs/API.md",
+    "body": "### What is wrong or missing\n\ndocs/API.md contains misspellings such as \"recieve\" and \"seperate\".\n\n### Expected behavior (the done condition)\n\ndocs/API.md has no misspellings of \"receive\" and \"separate\"; no other content changes.\n"
+  },
+  {
+    "title": "Document DELETE /links/:slug in docs/API.md",
+    "body": "### What is wrong or missing\n\nThe API reference does not describe the delete endpoint.\n\n### Expected behavior (the done condition)\n\ndocs/API.md has a `DELETE /links/:slug` section describing the success and 404 responses as currently implemented.\n"
+  },
+  {
+    "title": "Add unit tests for computeStats",
+    "body": "### What is wrong or missing\n\n`src/stats.ts` has no direct tests.\n\n### Expected behavior (the done condition)\n\nA new test file `test/stats.test.ts` covers `computeStats` for a non-empty list (totals and average). Do not change `src/stats.ts`.\n"
+  },
+  {
+    "title": "Add a GET /health endpoint",
+    "body": "### What is wrong or missing\n\nThere is no endpoint for liveness checks.\n\n### Expected behavior (the done condition)\n\n`GET /health` returns 200 with body `{\"status\":\"ok\"}` and the JSON content-type.\n"
+  },
+  {
+    "title": "Support filtering GET /links by target substring",
+    "body": "### What is wrong or missing\n\nThere is no way to find links pointing at a domain.\n\n### Expected behavior (the done condition)\n\n`GET /links?q=example` returns only links whose target contains `example` (case-insensitive); paging applies after filtering.\n"
+  },
+  {
+    "title": "Invalid JSON in POST /links returns 500 instead of 400",
+    "body": "### What is wrong or missing\n\nA request body that is not valid JSON makes the handler throw.\n\n### Expected behavior (the done condition)\n\n`POST /links` with an invalid JSON body returns 400 with a JSON error body.\n"
+  }
+]

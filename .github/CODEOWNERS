@@ -1,0 +1,11 @@
+# Load-bearing paths require the owner's review (ruleset: require code owner review).
+# The factory's bot cannot satisfy a code-owner review. Replace OWNER via install.sh.
+*                         @arielzin33-creator
+/.factory/                @arielzin33-creator
+/.claude/                 @arielzin33-creator
+/.github/                 @arielzin33-creator
+/AGENTS.md                @arielzin33-creator
+/CLAUDE.md                @arielzin33-creator
+/docs/factory/CHARTER.md  @arielzin33-creator
+/docs/factory/CONTRACT.md @arielzin33-creator
+/package.json             @arielzin33-creator

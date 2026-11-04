@@ -1,0 +1,139 @@
+{
+  "policy_version": 1,
+  "factory_phase": "A",
+  "charter_status": "draft",
+  "_comment": "Machine-readable copy of docs/factory/CHARTER.md. Load-bearing: agents never edit this file. Change it only in a human PR reviewed under CODEOWNERS, then run `python3 .factory/scripts/factory.py config-hashes --update`.",
+
+  "unattended_max_tier": 1,
+  "tier3_unattended": false,
+  "second_reviewer_available": false,
+
+  "load_bearing": [
+    "src/auth/**",
+    "src/payments/**",
+    "**/migrations/**",
+    "**/*.sql",
+    ".github/**",
+    ".factory/**",
+    ".claude/**",
+    ".agents/**",
+    ".codex/**",
+    ".mcp.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/factory/CHARTER.md",
+    "docs/factory/CONTRACT.md",
+    "**/.env*",
+    "Dockerfile",
+    "**/*.tf",
+    "tsconfig*.json",
+    "eslint.config.*",
+    ".eslintrc*",
+    "vitest.config.*",
+    "jest.config.*",
+    "playwright.config.*",
+    ".npmrc",
+    ".nvmrc"
+  ],
+  "_load_bearing_package_json_fields": "Changes to these package.json fields are load-bearing because gates.sh runs them: scripts, engines, packageManager, overrides, workspaces.",
+  "load_bearing_package_json_fields": [
+    "scripts",
+    "engines",
+    "packageManager",
+    "overrides",
+    "workspaces"
+  ],
+  "config_hash_globs": [
+    ".factory/**",
+    ".claude/**",
+    ".github/**",
+    ".mcp.json",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/factory/CHARTER.md",
+    "docs/factory/CONTRACT.md"
+  ],
+  "test_globs": [
+    "test/**",
+    "tests/**",
+    "**/__tests__/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/test_*.py",
+    "**/*_test.*"
+  ],
+  "docs_globs": [
+    "*.md",
+    "docs/**/*.md"
+  ],
+  "tier2_globs": [
+    "**/*.tsx",
+    "**/*.jsx",
+    "**/*.css",
+    "**/*.scss",
+    "public/**",
+    "src/ui/**",
+    "src/api/public/**"
+  ],
+  "ignore_in_diff": [
+    "docs/factory/runs/**"
+  ],
+  "dependency_manifests": [
+    "package.json"
+  ],
+  "lockfiles": [
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock"
+  ],
+
+  "limits": {
+    "tier1_max_changed_lines": 400,
+    "tier1_max_files": 5,
+    "review_queue_max": 3,
+    "max_red_gate_runs_per_item": 2,
+    "max_runs_per_item": 3,
+    "max_ci_fix_commits": 3,
+    "daily_budget_usd": 25,
+    "per_run_budget_usd": 6,
+    "per_run_max_turns": 40,
+    "verify_run_budget_usd": 2,
+    "verify_run_max_turns": 20,
+    "triage_run_budget_usd": 1,
+    "triage_run_max_turns": 12,
+    "run_timeout_minutes": 45,
+    "stale_in_progress_hours": 3,
+    "prompt_max_untrusted_chars": 8000,
+    "ledger_reconcile_tolerance_pct": 10
+  },
+
+  "gates": {
+    "docs_only": "fast",
+    "tier0": "full",
+    "tier1": "full",
+    "tier2": "full",
+    "tier3": "deep"
+  },
+
+  "models": {
+    "_comment": "The verifier uses a different model from the implementer (writer never grades its own work; spec §5).",
+    "triage": "claude-sonnet-5-5",
+    "implementer": "claude-sonnet-5-5",
+    "verifier": "claude-opus-5-5"
+  },
+
+  "runtime": {
+    "claude_code_version": "2.1.318",
+    "claude_code_version_floor": "2.1.307",
+    "claude_code_action_sha": "c0949c50a78c1ec8ce2647db36629b870e715d0c"
+  },
+
+  "trusted_handoff_authors": [
+    "github-actions[bot]"
+  ],
+  "trusted_author_associations": [
+    "OWNER",
+    "MEMBER",
+    "COLLABORATOR"
+  ]
+}

@@ -1,0 +1,31 @@
+name: Factory task
+description: A small, checkable piece of work for the software factory (bug fix, chore, docs).
+labels: ["factory:inbox"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The factory takes Tier 0–1 work only: documentation, dependency bumps, and bounded bug
+        fixes or small changes inside one module (at most 5 files, 400 lines). Features, UI and
+        anything load-bearing need a human-approved spec. Issues from people outside the project
+        are reviewed by a maintainer before any automation.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing
+      description: The observed behavior, and where (file or endpoint) if you know.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior (the done condition)
+      description: One checkable statement, for example "GET /links?limit=2 returns exactly 2 links".
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+    validations:
+      required: false

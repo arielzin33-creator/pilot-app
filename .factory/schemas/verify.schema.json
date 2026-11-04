@@ -1,0 +1,44 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "rejected",
+        "escalate"
+      ]
+    },
+    "done_when_met": {
+      "type": "boolean"
+    },
+    "scope_ok": {
+      "type": "boolean"
+    },
+    "test_constrains_fix": {
+      "type": "boolean"
+    },
+    "gaming_suspected": {
+      "type": "boolean"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risk_notes": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision",
+    "done_when_met",
+    "scope_ok",
+    "test_constrains_fix",
+    "gaming_suspected",
+    "findings",
+    "risk_notes"
+  ]
+}
