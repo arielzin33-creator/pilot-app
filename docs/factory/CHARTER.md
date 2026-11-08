@@ -10,7 +10,7 @@ stop conditions, §7 governance). Structure adapted from Addy Osmani's MIT-licen
 (see `NOTICE.md`).
 
 ```
-CHARTER_STATUS: draft      # policy.json "charter_status"; the factory refuses to run until "ready"
+CHARTER_STATUS: ready      # policy.json "charter_status"; the factory refuses to run until "ready"
 FACTORY_PHASE: A           # minimum viable factory: one loop, Tier 0 and Tier 1 only
 ```
 

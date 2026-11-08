@@ -1,7 +1,7 @@
 {
   "policy_version": 1,
   "factory_phase": "A",
-  "charter_status": "draft",
+  "charter_status": "ready",
   "_comment": "Machine-readable copy of docs/factory/CHARTER.md. Load-bearing: agents never edit this file. Change it only in a human PR reviewed under CODEOWNERS, then run `python3 .factory/scripts/factory.py config-hashes --update`.",
   "unattended_max_tier": 1,
   "tier3_unattended": false,
